@@ -19,6 +19,7 @@ import { paginationItems } from '../lib/pagination.js';
 import { masonryColumns, masonryLayout } from '../lib/masonry.js';
 import { explanationLabel, localizeDocument, resolveLanguage, t } from '../lib/i18n.js';
 import { buildModelAliasIndex, loadSettings, recordModelDisplayName } from '../lib/settings.js';
+import { blobFromDataUrl, normalizeImageBlob } from '../lib/api.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -473,11 +474,12 @@ async function addCurrentImageToCharacters() {
       showToast(t('这张图片已经在角色与物品库中', {}, currentLanguage));
       return;
     }
+    const normalized = await normalizeImageBlob(rec.blob, 2048, { forceReencode: true });
     const inserted = await addCharacterFromAlbumUnique({
       id: crypto.randomUUID(),
       createdAt: Date.now(),
       name: characterNameOf(rec),
-      blob: rec.blob,
+      blob: await blobFromDataUrl(normalized.dataUrl),
       albumRecordId: rec.id,
       prompt: rec.prompt || '',
       sourcePrompt: rec.sourcePrompt || '',
@@ -897,8 +899,12 @@ els.lbImgBox.addEventListener('pointermove', (e) => {
 els.lbCopy.addEventListener('click', async () => {
   const rec = records.find((r) => r.id === currentLbId);
   if (!rec) return;
-  await navigator.clipboard.writeText(rec.prompt || '').catch(() => {});
-  showToast(t('提示词已复制', {}, currentLanguage));
+  try {
+    await navigator.clipboard.writeText(rec.prompt || '');
+    showToast(t('提示词已复制', {}, currentLanguage));
+  } catch (error) {
+    showToast(ui('复制失败：{error}', { error: error?.message || error }));
+  }
 });
 
 els.lbDownload.addEventListener('click', () => {

@@ -20,6 +20,7 @@ import {
 } from '../lib/task-state.js';
 import { grantPrivacyConsent, hasPrivacyConsent } from '../lib/privacy.js';
 import { explanationLabel, localizeDocument, localizeRuntimeError, resolveLanguage, t } from '../lib/i18n.js';
+import { blobFromDataUrl, normalizeImageBlob } from '../lib/api.js';
 
 const $ = (id) => document.getElementById(id);
 const MAX_CONCURRENT_GENERATION_JOBS = 4;
@@ -1267,7 +1268,7 @@ function updateHints() {
     const actual = sizeParts[0] / sizeParts[1];
     if (Math.abs(wanted - actual) / wanted > 0.03) note = ui('（近似值）');
   }
-  els.sizeHint.textContent = size ? `${ui('尺寸')} ${size}${note}` : '';
+  els.sizeHint.textContent = size ? `${ui('参考尺寸')} ${size}${note}` : '';
   const choice = listModelChoices(settings, 'image').find((item) =>
     choiceValue(item) === els.selImageModel.value);
   els.modelHint.textContent = choice ? `${ui('默认生图')}：${choice.platformName} · ${choice.model}` : ui('尚未启用生图模型');
@@ -2177,8 +2178,12 @@ els.btnReverse.addEventListener('click', autoReverse);
 els.btnCopyPrompt.addEventListener('click', async () => {
   const text = els.taPrompt.value.trim();
   if (!text) return;
-  await navigator.clipboard.writeText(text).catch(() => {});
-  showToast(ui('提示词已复制'));
+  try {
+    await navigator.clipboard.writeText(text);
+    showToast(ui('提示词已复制'));
+  } catch (error) {
+    showToast(ui('复制失败：{error}', { error: error?.message || error }));
+  }
 });
 els.btnGenerate.addEventListener('click', generate);
 els.btnCancelGroup.addEventListener('click', cancelGroupJob);
@@ -2244,14 +2249,22 @@ document.addEventListener('keydown', (event) => {
 $('characterFile').addEventListener('change', async (e) => {
   const file = e.target.files?.[0];
   if (!file) return;
-  await addCharacter({
-    id: crypto.randomUUID(),
-    createdAt: Date.now(),
-    name: file.name.replace(/\.[^.]+$/, '') || ui('新素材'),
-    blob: file
-  });
-  e.target.value = '';
-  await refreshCharacters();
+  try {
+    if (!/^image\//i.test(file.type || '')) throw new Error(ui('请选择有效的图片文件'));
+    if (file.size > 32 * 1024 * 1024) throw new Error(ui('素材图片不能超过 32 MiB'));
+    const normalized = await normalizeImageBlob(file, 2048, { forceReencode: true });
+    await addCharacter({
+      id: crypto.randomUUID(),
+      createdAt: Date.now(),
+      name: file.name.replace(/\.[^.]+$/, '') || ui('新素材'),
+      blob: await blobFromDataUrl(normalized.dataUrl)
+    });
+    await refreshCharacters();
+  } catch (error) {
+    showToast(ui('添加素材失败：{error}', { error: error?.message || error }));
+  } finally {
+    e.target.value = '';
+  }
 });
 els.selRatio.addEventListener('change', () => {
   updateHints();

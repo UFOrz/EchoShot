@@ -63,18 +63,21 @@
 
     <section class="card">
       <h2>③ 比例与尺寸</h2>
-      <p class="desc">比例会映射为生图接口的 size 参数，请按所选模型支持的尺寸填写。</p>
+      <p class="desc">像素尺寸用于 OpenAI 兼容接口及需要宽高的模型；其他平台会按所选比例和分辨率档位转换为各自支持的请求参数。</p>
       <div class="size-grid">
-        <div class="row"><label>1:1</label><input id="size11" type="text" placeholder="1024x1024" /></div>
-        <div class="row"><label>3:2</label><input id="size32" type="text" placeholder="1536x1024" /></div>
-        <div class="row"><label>2:3</label><input id="size23" type="text" placeholder="1024x1536" /></div>
-        <div class="row"><label>16:9</label><input id="size169" type="text" placeholder="1536x1024" /></div>
-        <div class="row"><label>9:16</label><input id="size916" type="text" placeholder="1024x1536" /></div>
+        <div class="row"><label>1:1</label><input id="size11" type="text" pattern="[0-9]+x[0-9]+" inputmode="numeric" placeholder="1024x1024" /></div>
+        <div class="row"><label>4:3</label><input id="size43" type="text" pattern="[0-9]+x[0-9]+" inputmode="numeric" placeholder="1536x1152" /></div>
+        <div class="row"><label>3:4</label><input id="size34" type="text" pattern="[0-9]+x[0-9]+" inputmode="numeric" placeholder="1152x1536" /></div>
+        <div class="row"><label>3:2</label><input id="size32" type="text" pattern="[0-9]+x[0-9]+" inputmode="numeric" placeholder="1536x1024" /></div>
+        <div class="row"><label>2:3</label><input id="size23" type="text" pattern="[0-9]+x[0-9]+" inputmode="numeric" placeholder="1024x1536" /></div>
+        <div class="row"><label>16:9</label><input id="size169" type="text" pattern="[0-9]+x[0-9]+" inputmode="numeric" placeholder="1536x864" /></div>
+        <div class="row"><label>9:16</label><input id="size916" type="text" pattern="[0-9]+x[0-9]+" inputmode="numeric" placeholder="864x1536" /></div>
       </div>
       <div class="row">
         <label for="defaultRatio">默认比例</label>
         <select id="defaultRatio">
-          <option value="1:1">1:1</option><option value="3:2">3:2</option>
+          <option value="1:1">1:1</option><option value="4:3">4:3</option><option value="3:4">3:4</option>
+          <option value="3:2">3:2</option>
           <option value="2:3">2:3</option><option value="16:9">16:9</option><option value="9:16">9:16</option>
         </select>
       </div>
@@ -102,7 +105,7 @@
           </select>
         </label>
       </div>
-      <p class="quality-note">插件会根据模型协议提交对应选项；不支持 Quality 或分辨率档位的模型仍使用上方像素尺寸。</p>
+      <p class="quality-note">最终像素尺寸由所选平台和模型决定，可能与上方映射值不同；已知不支持的参数不会发送。</p>
     </section>
 
     <section class="card backup-card">

@@ -11,7 +11,15 @@ import {
 import { localizeDocument, resolveLanguage, t } from '../lib/i18n.js';
 
 const $ = (id) => document.getElementById(id);
-const sizeInputIds = { '1:1': 'size11', '3:2': 'size32', '2:3': 'size23', '16:9': 'size169', '9:16': 'size916' };
+const sizeInputIds = {
+  '1:1': 'size11',
+  '4:3': 'size43',
+  '3:4': 'size34',
+  '3:2': 'size32',
+  '2:3': 'size23',
+  '16:9': 'size169',
+  '9:16': 'size916'
+};
 let state = null;
 let toastTimer = 0;
 let activePlatformId = '';
@@ -38,7 +46,7 @@ function showToast(text) {
 function newPlatform() {
   return {
     id: crypto.randomUUID(), preset: 'custom', listed: true, name: ui('新平台'), baseUrl: '', apiKey: '',
-    models: [], modelAliases: {}, visionModels: [], imageModels: [], imageEditModels: []
+    models: [], modelAliases: {}, imageCapabilities: {}, visionModels: [], imageModels: [], imageEditModels: []
   };
 }
 
@@ -57,6 +65,7 @@ function newPresetPlatform(presetId) {
     apiKey: '',
     models: [...new Set([...visionModels, ...imageModels, ...disabledModels])],
     modelAliases: { ...(preset.modelAliases || {}) },
+    imageCapabilities: {},
     visionModels,
     imageModels,
     imageEditModels
@@ -199,6 +208,7 @@ function bindPlatformCard(card, platform) {
       if (platform.preset !== 'custom') {
         platform.models = [];
         platform.modelAliases = {};
+        platform.imageCapabilities = {};
         platform.visionModels = [];
         platform.imageModels = [];
         platform.imageEditModels = [];
@@ -215,6 +225,7 @@ function bindPlatformCard(card, platform) {
       ...(preset.disabledModels || [])
     ])];
     platform.modelAliases = { ...(preset.modelAliases || {}) };
+    platform.imageCapabilities = {};
     platform.visionModels = [...(preset.visionModels || [])];
     platform.imageModels = [...(preset.imageModels || [])];
     platform.imageEditModels = [...(preset.imageEditModels || [])];
@@ -263,6 +274,9 @@ function bindPlatformCard(card, platform) {
       }
       if (platform.preset === 'openrouter' && Array.isArray(resp.imageEditModels)) {
         platform.imageEditModels = [...new Set(resp.imageEditModels.filter((model) => platform.models.includes(model)))];
+        platform.imageCapabilities = Object.fromEntries(
+          Object.entries(resp.imageCapabilities || {}).filter(([model]) => platform.models.includes(model))
+        );
       }
       platformStatus.set(platform.id, ui('已获取 {total} 个，新增 {added} 个', { total: resp.models?.length || 0, added }));
     } catch (error) {
@@ -299,6 +313,7 @@ function bindPlatformCard(card, platform) {
     const model = e.target.closest('.model-row')?.dataset.model;
     platform.models = platform.models.filter((item) => item !== model);
     if (platform.modelAliases) delete platform.modelAliases[model];
+    if (platform.imageCapabilities) delete platform.imageCapabilities[model];
     platform.visionModels = platform.visionModels.filter((item) => item !== model);
     platform.imageModels = platform.imageModels.filter((item) => item !== model);
     platform.imageEditModels = (platform.imageEditModels || []).filter((item) => item !== model);
