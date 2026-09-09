@@ -146,10 +146,18 @@ body {
 }
 .backup-actions {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 9px;
   margin-top: 13px;
 }
+.backup-actions .btn {
+  flex: 1 1 170px;
+  min-width: 0;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+.backup-actions + .desc { margin-top: 10px; }
 
 .btn {
   border: 1px solid #e0e0ea;

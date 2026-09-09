@@ -30,10 +30,11 @@ import {
   testConnection
 } from './lib/api.js';
 import { hasPrivacyConsent } from './lib/privacy.js';
-import { addRecordWithSource } from './lib/db.js';
+import { addRecordWithSource, resumePendingBackups } from './lib/db.js';
 import { promptFromImageGenerationMetadata, readImageGenerationMetadata } from './lib/image-metadata.js';
 import { interruptedSessionPatch, normalizedWindowId, recoverInterruptedGenerationJobs, scopedSessionKey } from './lib/task-state.js';
 import { resolveLanguage, t } from './lib/i18n.js';
+import { generatedImages } from './lib/generation-results.js';
 
 const MENU_IMAGE = 'ir-image';
 const MENU_ALBUM = 'ir-album';
@@ -48,6 +49,8 @@ const runningJobs = new Map();
 const generationJobQueues = new Map();
 let surpriseHistoryQueue = Promise.resolve();
 const startupRecovery = recoverInterruptedJobs().catch(() => {});
+void startupRecovery.then(() => resumePendingBackups()).catch(() => {});
+void navigator.storage?.persist?.().catch(() => false);
 
 function errText(e) {
   return (e && (e.message || String(e))) || '未知错误';
@@ -1481,13 +1484,14 @@ async function generateGroupAndSave(payload, update, control) {
     stage: `正在使用文生图生成第 1/${count} 张`
   });
 
-  for (let index = 0; index < count; index += 1) {
+  let requestIndex = 0;
+  while (recordIds.length < count) {
     if (control.isCancelled()) break;
-    const number = index + 1;
-    if (index > 0) {
+    const number = recordIds.length + 1;
+    if (requestIndex > 0) {
       await update({ stage: `正在使用文生图生成第 ${number}/${count} 张` });
     }
-    const variationPrompt = index === 0
+    const variationPrompt = requestIndex === 0
       ? payload.prompt
       : `${payload.prompt}\n\n这是同一主题组图的第 ${number} 张。保持主体类型、核心外观、服装、环境、光线、色彩和整体画风尽量一致，仅对动作、表情、机位或构图做自然的小幅变化；不得增加或删除主要角色。`;
     const resp = await doGenerate({
@@ -1498,26 +1502,31 @@ async function generateGroupAndSave(payload, update, control) {
       windowId: payload.windowId
     });
     if (!resp?.ok) throw new Error(`第 ${number} 张失败：${resp?.error || '未知错误'}`);
-    const albumRecordId = await saveGeneratedRecord(resp, {
-      prompt: payload.prompt,
-      requestPrompt: variationPrompt,
-      source,
-      sourcePrompt: payload.sourcePrompt,
-      promptZh: payload.promptZh,
-      explanationLanguage: payload.explanationLanguage,
-      sourceAssetId: sourceAssetIdOf(source, groupId),
-      albumMeta: {
-        kind: 'group-item',
-        groupId,
-        groupIndex: number,
-        groupCount: count,
-        groupAnchor: false,
-        groupMode: 'text-to-image'
-      }
-    });
-    recordIds.push(albumRecordId);
-    await update({ completed: number, recordIds: [...recordIds], lastRecordId: albumRecordId });
-    if (control.isCancelled()) break;
+    const outputs = generatedImages(resp, count - recordIds.length);
+    for (const output of outputs) {
+      if (control.isCancelled()) break;
+      const groupIndex = recordIds.length + 1;
+      const albumRecordId = await saveGeneratedRecord(output, {
+        prompt: payload.prompt,
+        requestPrompt: variationPrompt,
+        source,
+        sourcePrompt: payload.sourcePrompt,
+        promptZh: payload.promptZh,
+        explanationLanguage: payload.explanationLanguage,
+        sourceAssetId: sourceAssetIdOf(source, groupId),
+        albumMeta: {
+          kind: 'group-item',
+          groupId,
+          groupIndex,
+          groupCount: count,
+          groupAnchor: false,
+          groupMode: 'text-to-image'
+        }
+      });
+      recordIds.push(albumRecordId);
+      await update({ completed: recordIds.length, recordIds: [...recordIds], lastRecordId: albumRecordId });
+    }
+    requestIndex += 1;
   }
   return {
     recordIds,

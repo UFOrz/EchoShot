@@ -320,10 +320,11 @@ function bindPlatformCard(card, platform) {
     renderPlatforms();
   });
   card.querySelector('.remove-platform').addEventListener('click', (e) => {
-    if (e.currentTarget.dataset.armed !== 'true') {
-      e.currentTarget.dataset.armed = 'true';
-      e.currentTarget.textContent = ui('再次点击删除');
-      setTimeout(() => { if (e.currentTarget?.isConnected) { e.currentTarget.dataset.armed = ''; e.currentTarget.textContent = ui('删除平台'); } }, 1800);
+    const button = e.currentTarget;
+    if (button.dataset.armed !== 'true') {
+      button.dataset.armed = 'true';
+      button.textContent = ui('再次点击删除');
+      setTimeout(() => { if (button.isConnected) { button.dataset.armed = ''; button.textContent = ui('删除平台'); } }, 1800);
       return;
     }
     state.platforms = state.platforms.filter((item) => item.id !== platform.id);

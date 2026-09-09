@@ -261,7 +261,8 @@ body {
 }
 .empty-icon { font-size: 44px; margin-bottom: 12px; }
 .empty-title { font-weight: 600; font-size: 15px; margin: 0 0 8px; }
-.empty-desc { color: #8a8a99; margin: 0; }
+.empty-desc { color: #8a8a99; margin: 0; white-space: pre-line; }
+.empty #btnRetryLoad { margin-top: 14px; }
 
 /* 灯箱 */
 .lightbox { position: fixed; inset: 0; z-index: 50; display: flex; align-items: center; justify-content: center; }

@@ -804,3 +804,8 @@ select {
   z-index: 100;
   white-space: normal;
 }
+/* Explicit opt-in before requesting a random prompt. */
+.surprise-choices { display: flex; flex-direction: column; gap: 12px; }
+.surprise-choices[hidden] { display: none; }
+.surprise-choices .surprise-start { min-height: 64px; font-size: 20px; font-weight: 700; }
+.surprise-choices .btn { width: 100%; white-space: normal; }

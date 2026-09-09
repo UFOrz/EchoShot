@@ -28,6 +28,7 @@ const els = {
   empty: $('empty'),
   emptyTitle: $('emptyTitle'),
   emptyDesc: $('emptyDesc'),
+  btnRetryLoad: $('btnRetryLoad'),
   countTag: $('countTag'),
   searchInput: $('searchInput'),
   btnDownloadAll: $('btnDownloadAll'),
@@ -127,10 +128,8 @@ function displayedRecordModel(rec) {
 }
 
 function generationMetadataForRecord(rec) {
-  return buildEchoShotMetadata(rec, {
-    displayModel: displayedRecordModel(rec),
-    version: chrome.runtime.getManifest().version
-  });
+  // Keep download bytes consistent with the stable local-backup metadata.
+  return buildEchoShotMetadata(rec);
 }
 
 async function downloadableRecordBlob(rec) {
@@ -794,6 +793,16 @@ async function deleteRecords(ids) {
   applyFilter();
 }
 
+async function deleteRecordsWithFeedback(ids) {
+  try {
+    await deleteRecords(ids);
+    return true;
+  } catch (error) {
+    showToast(ui('删除失败：{error}', { error: error?.message || String(error) }));
+    return false;
+  }
+}
+
 // ---------- 事件 ----------
 
 els.btnSelectAll.addEventListener('click', () => {
@@ -827,8 +836,9 @@ els.btnDeleteSel.addEventListener('click', async () => {
   const n = selected.size;
   if (!n) return;
   if (!await requestDeleteConfirmation(ui('确定删除选中的 {count} 张图片吗？此操作不可恢复。', { count: n }))) return;
-  await deleteRecords([...selected]);
-  showToast(ui('已删除 {count} 张图片', { count: n }));
+  if (await deleteRecordsWithFeedback([...selected])) {
+    showToast(ui('已删除 {count} 张图片', { count: n }));
+  }
 });
 
 els.btnOptions.addEventListener('click', async () => {
@@ -841,20 +851,20 @@ els.btnOptions.addEventListener('click', async () => {
 
 els.searchInput.addEventListener('input', () => {
   clearTimeout(searchTimer);
-  searchTimer = setTimeout(() => void loadPage(0), 220);
+  searchTimer = setTimeout(() => void loadPageSafely(0), 220);
 });
 
 els.btnPrevPage.addEventListener('click', () => {
-  if (pageOffset > 0) void loadPage(Math.max(0, pageOffset - PAGE_SIZE));
+  if (pageOffset > 0) void loadPageSafely(Math.max(0, pageOffset - PAGE_SIZE));
 });
 els.btnNextPage.addEventListener('click', () => {
-  if (hasMore) void loadPage(pageOffset + PAGE_SIZE);
+  if (hasMore) void loadPageSafely(pageOffset + PAGE_SIZE);
 });
 els.pageNumbers.addEventListener('click', (event) => {
   const button = event.target.closest('button[data-page]');
   if (!button || button.getAttribute('aria-current') === 'page') return;
   const page = Number(button.dataset.page);
-  if (Number.isInteger(page) && page > 0) void loadPage((page - 1) * PAGE_SIZE);
+  if (Number.isInteger(page) && page > 0) void loadPageSafely((page - 1) * PAGE_SIZE);
 });
 
 let compactPager = window.innerWidth <= 520;
@@ -919,8 +929,9 @@ els.lbDelete.addEventListener('click', async () => {
   if (!rec) return;
   if (!await requestDeleteConfirmation(t('确定删除这张图片吗？此操作不可恢复。', {}, currentLanguage))) return;
   closeLightbox();
-  await deleteRecords([rec.id]);
-  showToast(t('已删除', {}, currentLanguage));
+  if (await deleteRecordsWithFeedback([rec.id])) {
+    showToast(t('已删除', {}, currentLanguage));
+  }
 });
 
 async function openPanelAction(action, extra = {}) {
@@ -991,15 +1002,54 @@ async function loadPage(offset = 0, requestedId = '') {
   if (requestedId && records.some((rec) => rec.id === requestedId)) openLightbox(requestedId);
 }
 
+function showAlbumLoadError(error) {
+  closeLightbox();
+  revokePageUrls();
+  records = [];
+  filtered = [];
+  selected.clear();
+  els.grid.hidden = true;
+  els.pager.hidden = true;
+  els.empty.hidden = false;
+  els.emptyTitle.textContent = ui('相册读取失败');
+  const detail = error?.name === 'VersionError'
+    ? ui('当前插件版本无法读取较新版本的相册数据库，请更新插件后重试。')
+    : (error?.message || String(error));
+  els.emptyDesc.textContent = `${ui('相册数据仍可能保存在本机，请勿卸载插件或清除浏览数据。')}\n${detail}`;
+  els.btnRetryLoad.hidden = false;
+  els.countTag.textContent = ui('读取失败');
+  totalRecords = 0;
+  totalAlbumRecords = 0;
+  updateSelUI();
+}
+
+async function loadPageSafely(offset = 0, requestedId = '') {
+  try {
+    els.grid.hidden = false;
+    els.btnRetryLoad.hidden = true;
+    await loadPage(offset, requestedId);
+    return true;
+  } catch (error) {
+    showAlbumLoadError(error);
+    return false;
+  }
+}
+
+els.btnRetryLoad.addEventListener('click', () => void loadPageSafely(pageOffset));
+
 (async function init() {
-  const settings = await loadSettings();
-  currentLanguage = resolveLanguage(settings.language);
-  updateModelAliasIndex(settings);
-  localizeDocument(currentLanguage);
-  const currentWindow = await chrome.windows.getCurrent();
-  albumWindowId = currentWindow?.id;
-  const requestedId = new URLSearchParams(location.search).get('open');
-  await loadPage(0, requestedId || '');
+  try {
+    const settings = await loadSettings();
+    currentLanguage = resolveLanguage(settings.language);
+    updateModelAliasIndex(settings);
+    localizeDocument(currentLanguage);
+    const currentWindow = await chrome.windows.getCurrent();
+    albumWindowId = currentWindow?.id;
+    const requestedId = new URLSearchParams(location.search).get('open');
+    await loadPageSafely(0, requestedId || '');
+  } catch (error) {
+    showAlbumLoadError(error);
+  }
 })();
 
 chrome.storage.local.onChanged.addListener((changes) => {
@@ -1009,7 +1059,7 @@ chrome.storage.local.onChanged.addListener((changes) => {
     updateModelAliasIndex(settings);
     localizeDocument(currentLanguage);
     if (els.searchInput.value.trim()) {
-      void loadPage(0);
+      void loadPageSafely(0);
     } else {
       renderGrid();
       if (currentLbId) openLightbox(currentLbId);

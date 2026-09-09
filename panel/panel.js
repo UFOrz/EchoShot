@@ -635,7 +635,7 @@ function setPromptLoadingLabel(key) {
 }
 
 function setSurpriseButtonsDisabled(disabled) {
-  for (const id of ['btnSurprise', 'btnSurprise2', 'btnSurpriseAgain']) {
+  for (const id of ['btnSurprise', 'btnSurprise2', 'btnSurpriseAgain', 'btnSurpriseStart', 'btnManualPrompt']) {
     $(id).disabled = Boolean(disabled);
   }
 }
@@ -659,6 +659,9 @@ function applyDefaultRatio() {
 }
 
 function resetTaskUI() {
+  show($('surpriseChoices'), false);
+  show($('visionModelPicker'), true);
+  show($('btnSurpriseAgain'), true);
   resultRevealToken += 1;
   clearResultCards();
   visibleJobState = null;
@@ -857,7 +860,7 @@ function renderSurpriseFailure(task = {}) {
 }
 
 async function renderSurpriseTask(task, { restoreResult = true } = {}) {
-  if (!task?.prompt) return false;
+  if (!task?.prompt && task?.profile !== 'manual') return false;
   const ts = Number(task.sourceTs || task.updatedAt || Date.now());
   const requestId = task.sourceRequestId || `surprise:${crypto.randomUUID()}`;
   const preserveVisibleResult =
@@ -874,7 +877,7 @@ async function renderSurpriseTask(task, { restoreResult = true } = {}) {
   reversedPrompt = task.sourcePrompt || task.prompt;
   reversedPromptZh = currentLanguage === 'zh' ? currentSurpriseExplanation : '';
   reversedPromptLanguage = reversedPromptZh ? 'zh' : '';
-  els.taPrompt.value = task.prompt;
+  els.taPrompt.value = task.prompt || '';
   els.taPrompt.placeholder = ui('可以直接编辑提示词');
   els.secPrompt.classList.add('surprise-active');
   setSurpriseModelState();
@@ -885,6 +888,8 @@ async function renderSurpriseTask(task, { restoreResult = true } = {}) {
   show(els.secSource, false);
   show(els.secPrompt, true);
   show(els.secGen, true);
+  show($('visionModelPicker'), task.profile !== 'manual');
+  show($('btnSurpriseAgain'), task.profile !== 'manual');
   if ([...els.selRatio.options].some((option) => option.value === task.ratio)) {
     els.selRatio.value = task.ratio;
   }
@@ -905,6 +910,10 @@ async function renderSurpriseTask(task, { restoreResult = true } = {}) {
 async function refreshWorkspace() {
   const surpriseTask = await getWindowSession('surpriseTask').catch(() => null);
   if (surpriseTask?.active) {
+    if (surpriseTask.status === 'choice') {
+      renderSurpriseChoices(surpriseTask);
+      return;
+    }
     if (surpriseTask.status === 'running') {
       renderSurpriseLoading(surpriseTask);
       return;
@@ -913,12 +922,36 @@ async function refreshWorkspace() {
       renderSurpriseFailure(surpriseTask);
       return;
     }
-    if (surpriseTask.prompt) {
+    if (surpriseTask.prompt || surpriseTask.profile === 'manual') {
       await renderSurpriseTask(surpriseTask);
       return;
     }
   }
   await refreshPending();
+}
+
+function renderSurpriseChoices(task) {
+  resetTaskUI();
+  source = { requestId: task.sourceRequestId, ts: task.sourceTs, status: 'ready', surprise: true };
+  surpriseMode = true;
+  for (const section of [els.secEmpty, els.secSource, els.secPrompt, els.secGen]) show(section, false);
+  show($('surpriseChoices'), true);
+}
+
+async function openSurpriseChoices() {
+  if (!privacyConsentGranted) { renderPrivacyRequired(); return; }
+  if (generating || reversing || surpriseGenerating) return showToast(ui('当前已有生成任务进行中'));
+  const task = { active: true, status: 'choice', sourceRequestId: `surprise:${crypto.randomUUID()}`, sourceTs: Date.now() };
+  renderSurpriseChoices(task);
+  await setWindowSession('surpriseTask', task).catch(() => {});
+}
+
+async function openManualPrompt() {
+  const task = { active: true, status: 'ready', profile: 'manual', profileLabel: '手动输入',
+    prompt: '', sourceRequestId: `surprise:${crypto.randomUUID()}`, sourceTs: Date.now(), ratio: els.selRatio.value };
+  await renderSurpriseTask(task, { restoreResult: false });
+  await setWindowSession('surpriseTask', task).catch(() => {});
+  els.taPrompt.focus();
 }
 
 async function createSurprisePrompt() {
@@ -2189,8 +2222,10 @@ els.btnGenerate.addEventListener('click', generate);
 els.btnCancelGroup.addEventListener('click', cancelGroupJob);
 $('btnCapture').addEventListener('click', capturePage);
 $('btnCapture2').addEventListener('click', capturePage);
-$('btnSurprise').addEventListener('click', createSurprisePrompt);
-$('btnSurprise2').addEventListener('click', createSurprisePrompt);
+$('btnSurprise').addEventListener('click', openSurpriseChoices);
+$('btnSurprise2').addEventListener('click', openSurpriseChoices);
+$('btnSurpriseStart').addEventListener('click', createSurprisePrompt);
+$('btnManualPrompt').addEventListener('click', openManualPrompt);
 $('btnSurpriseAgain').addEventListener('click', createSurprisePrompt);
 $('btnMagicToggle').addEventListener('click', async (e) => {
   const button = e.currentTarget;

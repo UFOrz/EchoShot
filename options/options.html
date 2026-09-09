@@ -122,6 +122,26 @@
       </div>
     </section>
 
+    <section class="card backup-card">
+      <h2>⑤ 图片本地备份</h2>
+      <p class="desc">生成图片保存到相册后，自动在所选目录的 EchoShot-backup 文件夹内备份成图、原图、角色与物品库及恢复清单。成图包含与相册下载一致的内嵌元数据，文件使用 SHA-256 校验。删除相册作品不会删除本地备份。</p>
+      <div class="row"><label for="localBackupEnabled">自动备份</label><input id="localBackupEnabled" type="checkbox" /></div>
+      <p id="localBackupDirectory">尚未选择目录</p>
+      <div class="backup-actions">
+        <button class="btn" id="localBackupChoose" type="button">选择 / 重新授权目录</button>
+        <button class="btn ghost" id="localBackupRun" type="button">补备份现有相册</button>
+        <button class="btn ghost" id="localBackupStop" type="button" hidden>停止补备份</button>
+        <button class="btn ghost" id="localBackupVerify" type="button">校验备份完整性</button>
+        <button class="btn ghost" id="localBackupRestore" type="button">从备份恢复相册</button>
+        <button class="btn ghost" id="localBackupDiagnose" type="button">诊断容量和目录权限</button>
+      </div>
+      <p class="desc">未完成项目保存在持久队列中，浏览器重启后会自动补齐；若系统收回目录授权，请重新授权。恢复不会覆盖相同 ID 的已有记录。目录授权不随配置导出。</p>
+      <p id="localBackupStatus" role="status" aria-live="polite"></p>
+      <p id="localBackupCounts" class="desc" aria-live="polite"></p>
+      <p id="localStorageStatus" class="desc" aria-live="polite"></p>
+      <p id="localBackupDiagnostics" class="desc" aria-live="polite"></p>
+    </section>
+
     <div class="footer">
       <button class="btn primary" id="btnSave">保存设置</button>
       <button class="btn ghost" id="btnAlbum">打开相册</button>
@@ -131,5 +151,6 @@
   </div>
   <div id="toast" class="toast" hidden></div>
   <script type="module" src="options.js"></script>
+  <script type="module" src="local-backup.js"></script>
 </body>
 </html>

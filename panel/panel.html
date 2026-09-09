@@ -87,6 +87,12 @@
       <div class="source-meta" id="srcMeta"></div>
     </section>
 
+    <section id="surpriseChoices" class="card surprise-choices" hidden>
+      <div class="card-title">选择创作方式</div>
+      <button id="btnSurpriseStart" class="btn primary surprise-start" type="button">🎲 惊喜</button>
+      <button id="btnManualPrompt" class="btn ghost" type="button">手动输入</button>
+    </section>
+
     <!-- 提示词 -->
     <section id="secPrompt" class="card" hidden>
       <div class="card-title row">
@@ -252,5 +258,6 @@
   </div>
 
   <script type="module" src="panel.js"></script>
+  <script type="module" src="../lib/backup-notice.js"></script>
 </body>
 </html>
