@@ -26,7 +26,9 @@ import {
   generateImageEdit,
   runningHubNeedsSource,
   listModels,
+  listApiMartModelCatalog,
   listOpenRouterModels,
+  listRunningHubModels,
   testConnection
 } from './lib/api.js';
 import { hasPrivacyConsent } from './lib/privacy.js';
@@ -405,8 +407,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       case 'ir.test':
         return { ok: true, result: await testConnection(msg.payload.cfg) };
       case 'ir.listModels':
+        if (msg.payload.cfg?.preset === 'apimart') {
+          return { ok: true, ...(await listApiMartModelCatalog()) };
+        }
         if (msg.payload.cfg?.preset === 'openrouter') {
           return { ok: true, ...(await listOpenRouterModels(msg.payload.cfg)) };
+        }
+        if (['runninghub', 'runninghub_cn'].includes(msg.payload.cfg?.preset)) {
+          return { ok: true, ...(await listRunningHubModels(msg.payload.cfg)) };
         }
         return { ok: true, models: await listModels(msg.payload.cfg) };
       default:
@@ -995,7 +1003,7 @@ async function doEdit({ prompt, ratio, selection, sourceDataUrl, referenceDataUr
       resolution
     });
   } else if (cfg.apiType === 'runninghub-v2') {
-    if (!runningHubNeedsSource(cfg.model)) {
+    if (!runningHubNeedsSource(cfg.model, cfg.imageCapabilities)) {
       return { ok: false, error: '请选择 RunningHUB 的 image-to-image 或 edit 模型' };
     }
     r = await generateRunningHubImage({ cfg, prompt: prompt.trim(), ratio, size, sourceDataUrl, referenceDataUrl, resolution });

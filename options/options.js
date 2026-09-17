@@ -4,8 +4,11 @@ import {
   DEFAULT_PLATFORM_PRESET_IDS,
   PRESETS,
   RATIOS,
+  applyRunningHubModelCatalog,
   listModelChoices,
   loadSettings,
+  modelCapabilityKinds,
+  presetIdFromBaseUrl,
   saveSettings
 } from '../lib/settings.js';
 import { localizeDocument, resolveLanguage, t } from '../lib/i18n.js';
@@ -36,6 +39,12 @@ const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (ch) => ({
   '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
 }[ch]));
 
+const MODEL_KIND_ICONS = {
+  vision: '<svg class="model-kind-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"></circle><path d="m15.5 15.5 4.5 4.5"></path></svg>',
+  'text-to-image': '<svg class="model-kind-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8.5 6 10 4.5h4L15.5 6H19a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2Z"></path><circle cx="12" cy="12.5" r="3.5"></circle></svg>',
+  'image-edit': '<svg class="model-kind-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="15" rx="2"></rect><circle cx="8.5" cy="10" r="1.5"></circle><path d="m4 17 4.5-4 3.5 3 2.5-2 5.5 5"></path></svg>'
+};
+
 function showToast(text) {
   $('toast').textContent = text;
   $('toast').hidden = false;
@@ -46,7 +55,7 @@ function showToast(text) {
 function newPlatform() {
   return {
     id: crypto.randomUUID(), preset: 'custom', listed: true, name: ui('新平台'), baseUrl: '', apiKey: '',
-    models: [], modelAliases: {}, imageCapabilities: {}, visionModels: [], imageModels: [], imageEditModels: []
+    models: [], modelAliases: {}, modelKinds: {}, imageCapabilities: {}, visionModels: [], imageModels: [], imageEditModels: []
   };
 }
 
@@ -65,6 +74,7 @@ function newPresetPlatform(presetId) {
     apiKey: '',
     models: [...new Set([...visionModels, ...imageModels, ...disabledModels])],
     modelAliases: { ...(preset.modelAliases || {}) },
+    modelKinds: {},
     imageCapabilities: {},
     visionModels,
     imageModels,
@@ -81,9 +91,22 @@ function modelRows(platform) {
   return visibleModels.map((model) => {
     const enabled = platform.visionModels.includes(model) || platform.imageModels.includes(model);
     const alias = String(platform.modelAliases?.[model] || '').trim();
+    const kindDefinitions = {
+      vision: { icon: MODEL_KIND_ICONS.vision, label: ui('适合反推'), className: 'vision' },
+      'text-to-image': { icon: MODEL_KIND_ICONS['text-to-image'], label: ui('适合文生图'), className: 'text-image' },
+      'image-edit': { icon: MODEL_KIND_ICONS['image-edit'], label: ui('适合图像编辑'), className: 'image-edit' }
+    };
+    const kinds = modelCapabilityKinds(platform, model)
+      .map((kind) => kindDefinitions[kind])
+      .filter(Boolean);
+    const kindBadges = kinds.length
+      ? `<span class="model-kind-badges" aria-label="${esc(kinds.map((kind) => kind.label).join('、'))}">${kinds.map((kind) => (
+          `<span class="model-kind ${esc(kind.className)}" title="${esc(kind.label)}" aria-hidden="true">${kind.icon}</span>`
+        )).join('')}</span>`
+      : '';
     return `
     <div class="model-row${enabled ? '' : ' disabled-model'}" data-model="${esc(model)}">
-      <span class="model-name" title="${esc(model)}">${esc(model)}</span>
+      <span class="model-identity">${kindBadges}<span class="model-name" title="${esc(model)}">${esc(model)}</span></span>
       <input class="model-alias" type="text" value="${esc(alias)}" placeholder="${esc(ui('模型别名（可选）'))}" aria-label="${esc(ui('为 {model} 设置别名', { model }))}" />
       <label><input type="checkbox" data-capability="vision" ${platform.visionModels.includes(model) ? 'checked' : ''}/> ${esc(ui('反推'))}</label>
       <label><input type="checkbox" data-capability="image" ${platform.imageModels.includes(model) ? 'checked' : ''}/> ${esc(ui('生图'))}</label>
@@ -176,7 +199,14 @@ function renderPlatforms() {
         <span class="platform-status">${esc(platformStatus.get(platform.id) || '')}</span>
       </div>
       <div class="model-head">
-        <span>${esc(ui('模型名称、别名与启用能力'))}</span>
+        <span class="model-head-main">
+          <span>${esc(ui('模型名称、别名与启用能力'))}</span>
+          <span class="model-kind-legend" aria-label="${esc(ui('模型能力图例'))}">
+            <span title="${esc(ui('适合反推'))}">${MODEL_KIND_ICONS.vision}<span>${esc(ui('反推'))}</span></span>
+            <span title="${esc(ui('适合文生图'))}">${MODEL_KIND_ICONS['text-to-image']}<span>${esc(ui('文生图'))}</span></span>
+            <span title="${esc(ui('适合图像编辑'))}">${MODEL_KIND_ICONS['image-edit']}<span>${esc(ui('编辑'))}</span></span>
+          </span>
+        </span>
         <label class="model-filter-toggle"><input class="show-disabled-models" type="checkbox" ${state.showDisabledModels ? 'checked' : ''}/> ${esc(ui('显示未启用模型'))}</label>
       </div>
       <div class="model-list">${modelRows(platform)}</div>`;
@@ -203,11 +233,12 @@ function bindPlatformCard(card, platform) {
     });
   });
   card.querySelector('[data-field="baseUrl"]').addEventListener('change', (e) => {
-    const presetId = Object.keys(PRESETS).find((id) => id !== 'custom' && PRESETS[id].baseUrl === e.target.value);
+    const presetId = presetIdFromBaseUrl(e.target.value);
     if (!presetId) {
       if (platform.preset !== 'custom') {
         platform.models = [];
         platform.modelAliases = {};
+        platform.modelKinds = {};
         platform.imageCapabilities = {};
         platform.visionModels = [];
         platform.imageModels = [];
@@ -219,12 +250,14 @@ function bindPlatformCard(card, platform) {
     const preset = PRESETS[presetId];
     platform.preset = presetId;
     platform.name = preset.label;
+    platform.baseUrl = preset.baseUrl;
     platform.models = [...new Set([
       ...(preset.visionModels || []),
       ...(preset.imageModels || []),
       ...(preset.disabledModels || [])
     ])];
     platform.modelAliases = { ...(preset.modelAliases || {}) };
+    platform.modelKinds = {};
     platform.imageCapabilities = {};
     platform.visionModels = [...(preset.visionModels || [])];
     platform.imageModels = [...(preset.imageModels || [])];
@@ -256,7 +289,24 @@ function bindPlatformCard(card, platform) {
       });
       if (!resp?.ok) throw new Error(resp?.error || ui('获取失败'));
       let added = 0;
-      for (const model of resp.models || []) if (addModel(platform, model)) added += 1;
+      if (platform.preset === 'runninghub_cn') {
+        const previousModels = new Set(platform.models);
+        Object.assign(platform, applyRunningHubModelCatalog(platform, resp, { replace: true }));
+        added = platform.models.filter((model) => !previousModels.has(model)).length;
+      } else {
+        for (const model of resp.models || []) if (addModel(platform, model)) added += 1;
+      }
+      if (platform.preset === 'runninghub') {
+        Object.assign(platform, applyRunningHubModelCatalog(platform, resp));
+      }
+      if (!['runninghub', 'runninghub_cn'].includes(platform.preset) && resp.modelKinds) {
+        platform.modelKinds = { ...(platform.modelKinds || {}) };
+        for (const [model, kinds] of Object.entries(resp.modelKinds)) {
+          if (platform.models.includes(model) && Array.isArray(kinds)) {
+            platform.modelKinds[model] = [...new Set(kinds)];
+          }
+        }
+      }
       if (['qianwenai', 'bailian_token_plan'].includes(platform.preset)) {
         const preset = PRESETS[platform.preset];
         platform.visionModels = [...new Set([
@@ -278,7 +328,14 @@ function bindPlatformCard(card, platform) {
           Object.entries(resp.imageCapabilities || {}).filter(([model]) => platform.models.includes(model))
         );
       }
-      platformStatus.set(platform.id, ui('已获取 {total} 个，新增 {added} 个', { total: resp.models?.length || 0, added }));
+      platformStatus.set(platform.id, ['runninghub', 'runninghub_cn'].includes(platform.preset)
+        ? ui('已获取 {total} 个（反推 {vision}，生图 {image}），新增 {added} 个', {
+            total: resp.models?.length || 0,
+            vision: resp.visionModels?.length || 0,
+            image: resp.imageModels?.length || 0,
+            added
+          })
+        : ui('已获取 {total} 个，新增 {added} 个', { total: resp.models?.length || 0, added }));
     } catch (error) {
       platformStatus.set(platform.id, ui('获取失败：{error}', { error: error?.message || error }));
     }
@@ -291,12 +348,22 @@ function bindPlatformCard(card, platform) {
   card.querySelector('.model-list').addEventListener('change', (e) => {
     const capability = e.target.dataset.capability;
     if (!capability) return;
-    const model = e.target.closest('.model-row')?.dataset.model;
+    const row = e.target.closest('.model-row');
+    const model = row?.dataset.model;
+    if (!model) return;
     const key = capability === 'vision' ? 'visionModels' : 'imageModels';
     platform[key] = e.target.checked
       ? [...new Set([...platform[key], model])]
       : platform[key].filter((item) => item !== model);
-    renderPlatforms();
+    const enabled = platform.visionModels.includes(model) || platform.imageModels.includes(model);
+    row.classList.toggle('disabled-model', !enabled);
+    if (!state.showDisabledModels && !enabled) row.remove();
+    const navItem = [...$('platformList').querySelectorAll('.platform-nav-item')]
+      .find((item) => item.dataset.id === platform.id);
+    const counts = navItem?.querySelectorAll('.platform-nav-count i') || [];
+    if (counts[0]) counts[0].textContent = ui('反 {count}', { count: platform.visionModels.length });
+    if (counts[1]) counts[1].textContent = ui('图 {count}', { count: platform.imageModels.length });
+    renderDefaults();
   });
   card.querySelector('.model-list').addEventListener('input', (e) => {
     if (!e.target.classList.contains('model-alias')) return;
@@ -313,6 +380,7 @@ function bindPlatformCard(card, platform) {
     const model = e.target.closest('.model-row')?.dataset.model;
     platform.models = platform.models.filter((item) => item !== model);
     if (platform.modelAliases) delete platform.modelAliases[model];
+    if (platform.modelKinds) delete platform.modelKinds[model];
     if (platform.imageCapabilities) delete platform.imageCapabilities[model];
     platform.visionModels = platform.visionModels.filter((item) => item !== model);
     platform.imageModels = platform.imageModels.filter((item) => item !== model);
