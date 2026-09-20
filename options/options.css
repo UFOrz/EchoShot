@@ -280,7 +280,7 @@ body {
 .model-filter-toggle { display: inline-flex; align-items: center; gap: 5px; color: #696678; cursor: pointer; white-space: nowrap; }
 .model-filter-toggle input { accent-color: #7557e5; }
 .model-list { max-height: 260px; overflow: auto; }
-.model-row { display: grid; grid-template-columns: minmax(140px, 1fr) minmax(120px, .72fr) 64px 64px 24px; gap: 6px; align-items: center; padding: 7px; border-bottom: 1px solid #efedf5; }
+.model-row { display: grid; grid-template-columns: minmax(140px, 1fr) minmax(170px, .9fr) 64px 64px 24px; gap: 6px; align-items: center; padding: 7px; border-bottom: 1px solid #efedf5; }
 .model-row.disabled-model { background: #fafafd; }
 .model-row.disabled-model .model-name { color: #aaa7b4; }
 .model-identity { min-width: 0; display: flex; align-items: center; gap: 6px; }
@@ -291,9 +291,14 @@ body {
 .model-kind.vision { color: #6545d6; border-color: #d9d0ff; background: #f0edff; }
 .model-kind.text-image { color: #2874a6; border-color: #cbe4f8; background: #edf7ff; }
 .model-kind.image-edit { color: #9a6617; border-color: #f0d8a7; background: #fff6e6; }
-.model-alias { min-width: 0; padding: 6px 8px; border: 1px solid #ddd9e8; border-radius: 7px; background: #fff; color: #383545; font-size: 11.5px; }
+.model-alias-wrap { min-width: 0; display: flex; align-items: center; gap: 4px; }
+.model-alias { flex: 1; min-width: 0; padding: 6px 8px; border: 1px solid #ddd9e8; border-radius: 7px; background: #fff; color: #383545; font-size: 11.5px; }
 .model-alias::placeholder { color: #aaa7b4; }
 .model-alias:focus { border-color: #8a6cf0; outline: 2px solid rgba(117, 87, 229, .12); }
+.model-alias-fetch { flex: 0 0 auto; padding: 5px 6px; border: 1px solid #d9d2fb; border-radius: 6px; background: #f4f1ff; color: #6545d6; font-size: 10px; cursor: pointer; }
+.model-alias-fetch:hover { background: #ebe5ff; }
+.model-alias-fetch:disabled { opacity: .5; cursor: wait; }
+.model-alias-fetch[hidden] { display: none; }
 .model-row label { color: #5f5f70; font-size: 11.5px; white-space: nowrap; }
 .model-row input { accent-color: #7557e5; }
 .model-remove { border: 0; border-radius: 6px; background: transparent; color: #a2a0ad; cursor: pointer; font-size: 17px; }
@@ -352,5 +357,5 @@ body {
     grid-template-columns: minmax(0, 1fr) 56px 56px 24px;
   }
   .model-identity { grid-column: 1 / 5; }
-  .model-alias { grid-column: 1; }
+  .model-alias-wrap { grid-column: 1; }
 }

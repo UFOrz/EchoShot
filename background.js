@@ -29,6 +29,7 @@ import {
   listApiMartModelCatalog,
   listOpenRouterModels,
   listRunningHubModels,
+  fetchRunningHubWorkflowTitle,
   testConnection
 } from './lib/api.js';
 import { hasPrivacyConsent } from './lib/privacy.js';
@@ -417,6 +418,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           return { ok: true, ...(await listRunningHubModels(msg.payload.cfg)) };
         }
         return { ok: true, models: await listModels(msg.payload.cfg) };
+      case 'ir.runningHubWorkflowTitle':
+        return {
+          ok: true,
+          title: await fetchRunningHubWorkflowTitle(msg.payload?.preset, msg.payload?.model)
+        };
       default:
         return { ok: false, error: '未知消息类型' };
     }
