@@ -117,6 +117,7 @@ let pageLoadSeq = 0;
 let currentLanguage = 'zh';
 let modelAliasIndex = buildModelAliasIndex({ platforms: [] });
 let masonryLayoutFrame = 0;
+const cardAnimations = new Map();
 const ui = (key, vars = {}) => t(key, vars, currentLanguage);
 
 function updateModelAliasIndex(settings) {
@@ -172,7 +173,7 @@ function closeDeleteConfirmation(accepted) {
   const resolve = confirmResolver;
   confirmResolver = null;
   resolve?.(accepted);
-  if (confirmReturnFocus?.isConnected) confirmReturnFocus.focus();
+  if (confirmReturnFocus?.isConnected) confirmReturnFocus.focus({ preventScroll: true });
   confirmReturnFocus = null;
 }
 
@@ -219,14 +220,14 @@ function revokePageUrls() {
 
 // ---------- 渲染 ----------
 
-function applyFilter() {
+function applyFilter(options) {
   filtered = records;
-  renderGrid();
+  renderGrid(options);
 }
 
 function layoutMasonry() {
   masonryLayoutFrame = 0;
-  const cards = [...els.grid.querySelectorAll(':scope > .card')];
+  const cards = [...els.grid.querySelectorAll(':scope > .card:not(.is-removing)')];
   if (!cards.length) {
     els.grid.style.height = '';
     return;
@@ -260,9 +261,118 @@ function scheduleMasonryLayout() {
   masonryLayoutFrame = requestAnimationFrame(layoutMasonry);
 }
 
-function renderGrid() {
-  els.grid.innerHTML = '';
-  els.grid.style.height = '';
+function animateGridElement(element, keyframes, duration, onFinish = null) {
+  cardAnimations.get(element)?.cancel();
+  element.classList.add('is-animating');
+  const animation = element.animate(keyframes, {
+    duration, easing: 'cubic-bezier(.22, 1, .36, 1)'
+  });
+  cardAnimations.set(element, animation);
+  void animation.finished.catch(() => {}).then(() => {
+    if (cardAnimations.get(element) === animation) {
+      cardAnimations.delete(element);
+      element.classList.remove('is-animating');
+    }
+    onFinish?.();
+  });
+}
+
+function prunePageUrls() {
+  // 淡出的图片也需要保留 URL，直到卡片真正离开页面。
+  const visibleIds = new Set([...els.grid.querySelectorAll(':scope > .card')].map(card => card.dataset.id));
+  for (const urls of [objectUrls, sourceObjectUrls]) {
+    for (const [id, url] of urls) {
+      if (visibleIds.has(id)) continue;
+      URL.revokeObjectURL(url);
+      urls.delete(id);
+    }
+  }
+}
+
+function createAlbumCard(rec) {
+  const card = document.createElement('div');
+  card.className = 'card' + (selected.has(rec.id) ? ' selected' : '');
+  card.dataset.id = rec.id;
+
+  const img = document.createElement('img');
+  img.className = 'thumb';
+  img.loading = 'lazy';
+  img.src = urlOf(rec);
+  img.alt = rec.prompt || '';
+  img.addEventListener('load', scheduleMasonryLayout, { once: true });
+  img.addEventListener('error', scheduleMasonryLayout, { once: true });
+  const intrinsicWidth = Number(rec.width);
+  const intrinsicHeight = Number(rec.height);
+  if (intrinsicWidth > 0 && intrinsicHeight > 0) {
+    img.width = Math.round(intrinsicWidth);
+    img.height = Math.round(intrinsicHeight);
+  }
+
+  const check = document.createElement('div');
+  check.className = 'check';
+  check.textContent = '✓';
+  check.title = t('选择', {}, currentLanguage);
+  check.addEventListener('click', (e) => {
+    e.stopPropagation();
+    toggleSelect(rec.id, card);
+  });
+
+  const tag = document.createElement('div');
+  tag.className = 'ratio-tag';
+  tag.textContent = rec.kind === 'group-item'
+    ? t('组图 {index}/{count}', { index: rec.groupIndex, count: rec.groupCount }, currentLanguage)
+    : (rec.ratio || '');
+
+  const foot = document.createElement('div');
+  foot.className = 'foot';
+  const p = document.createElement('div');
+  p.className = 'p';
+  p.textContent = rec.prompt || t('(无提示词)', {}, currentLanguage);
+  p.title = rec.prompt || '';
+  const zh = recordExplanationVisible(rec) ? document.createElement('div') : null;
+  if (zh) {
+    zh.className = 'zh';
+    zh.textContent = rec.promptZh;
+    zh.title = rec.promptZh;
+  }
+  const m = document.createElement('div');
+  m.className = 'm';
+  m.textContent = `${fmtTime(rec.createdAt)} · ${displayedRecordModel(rec)}`;
+  foot.append(p);
+  if (zh) foot.append(zh);
+  foot.append(m);
+
+  card.append(img, check, tag, foot);
+  card.addEventListener('click', () => openLightbox(rec.id));
+  return card;
+}
+
+function renderGrid({ animate = false } = {}) {
+  const canAnimate = animate && !matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const oldCards = new Map([...els.grid.querySelectorAll(':scope > .card:not(.is-removing)')]
+    .map(card => [card.dataset.id, card]));
+  const oldBounds = new Map();
+  const oldHeight = els.grid.offsetHeight;
+  if (canAnimate) {
+    for (const card of oldCards.values()) oldBounds.set(card, card.getBoundingClientRect());
+  }
+  cardAnimations.get(els.grid)?.cancel();
+  if (!animate) {
+    for (const animation of cardAnimations.values()) animation.cancel();
+    els.grid.replaceChildren();
+    els.grid.style.height = '';
+    oldCards.clear();
+  } else {
+    const retainedIds = new Set(filtered.map(rec => rec.id));
+    for (const [id, card] of oldCards) {
+      cardAnimations.get(card)?.cancel();
+      if (retainedIds.has(id)) continue;
+      card.classList.add('is-removing');
+      card.inert = true;
+      card.setAttribute('aria-hidden', 'true');
+      if (!canAnimate) card.remove();
+    }
+  }
   els.empty.hidden = filtered.length > 0;
   if (!filtered.length) {
     const isSearchEmpty = Boolean(els.searchInput.value.trim());
@@ -273,66 +383,52 @@ function renderGrid() {
   }
   els.countTag.textContent = totalRecords ? t('共 {count} 张', { count: totalRecords }, currentLanguage) : '';
 
+  let cursor = els.grid.firstElementChild;
   for (const rec of filtered) {
-    const card = document.createElement('div');
-    card.className = 'card' + (selected.has(rec.id) ? ' selected' : '');
-    card.dataset.id = rec.id;
-
-    const img = document.createElement('img');
-    img.className = 'thumb';
-    img.loading = 'lazy';
-    img.src = urlOf(rec);
-    img.alt = rec.prompt || '';
-    img.addEventListener('load', scheduleMasonryLayout, { once: true });
-    img.addEventListener('error', scheduleMasonryLayout, { once: true });
-    const intrinsicWidth = Number(rec.width);
-    const intrinsicHeight = Number(rec.height);
-    if (intrinsicWidth > 0 && intrinsicHeight > 0) {
-      img.width = Math.round(intrinsicWidth);
-      img.height = Math.round(intrinsicHeight);
-    }
-
-    const check = document.createElement('div');
-    check.className = 'check';
-    check.textContent = '✓';
-    check.title = t('选择', {}, currentLanguage);
-    check.addEventListener('click', (e) => {
-      e.stopPropagation();
-      toggleSelect(rec.id, card);
-    });
-
-    const tag = document.createElement('div');
-    tag.className = 'ratio-tag';
-    tag.textContent = rec.kind === 'group-item'
-      ? t('组图 {index}/{count}', { index: rec.groupIndex, count: rec.groupCount }, currentLanguage)
-      : (rec.ratio || '');
-
-    const foot = document.createElement('div');
-    foot.className = 'foot';
-    const p = document.createElement('div');
-    p.className = 'p';
-    p.textContent = rec.prompt || t('(无提示词)', {}, currentLanguage);
-    p.title = rec.prompt || '';
-    const zh = recordExplanationVisible(rec) ? document.createElement('div') : null;
-    if (zh) {
-      zh.className = 'zh';
-      zh.textContent = rec.promptZh;
-      zh.title = rec.promptZh;
-    }
-    const m = document.createElement('div');
-    m.className = 'm';
-    m.textContent = `${fmtTime(rec.createdAt)} · ${displayedRecordModel(rec)}`;
-    foot.append(p);
-    if (zh) foot.append(zh);
-    foot.append(m);
-
-    card.append(img, check, tag, foot);
-    card.addEventListener('click', () => openLightbox(rec.id));
-    els.grid.appendChild(card);
+    const card = oldCards.get(rec.id) || createAlbumCard(rec);
+    card.classList.toggle('selected', selected.has(rec.id));
+    while (cursor?.classList.contains('is-removing')) cursor = cursor.nextElementSibling;
+    if (card === cursor) cursor = cursor.nextElementSibling;
+    else els.grid.insertBefore(card, cursor);
   }
-  layoutMasonry();
+  // 选择条的显隐会改变容器位置，在测量最终坐标前一起提交。
   updateSelUI();
   updatePager();
+  layoutMasonry();
+  if (canAnimate) {
+    for (const card of els.grid.querySelectorAll(':scope > .card')) {
+      // 先前删除尚未淡出完成的卡片继续自己的动画。
+      if (card.classList.contains('is-removing') && !oldBounds.has(card)) continue;
+      const previous = oldBounds.get(card);
+      const current = card.getBoundingClientRect();
+      const base = getComputedStyle(card).transform;
+      const rest = base === 'none' ? '' : base;
+      const dx = previous ? previous.left - current.left : 0;
+      const dy = previous ? previous.top - current.top : 0;
+      if (card.classList.contains('is-removing')) {
+        const atPrevious = `translate(${dx}px, ${dy}px) ${rest}`;
+        animateGridElement(card, [
+          { opacity: 1, transform: `${atPrevious} scale(1)` },
+          { opacity: 0, transform: `${atPrevious} scale(.92)` }
+        ], 160, () => { card.remove(); prunePageUrls(); });
+      } else if (!previous) {
+        animateGridElement(card, [
+          { opacity: 0, transform: `${rest} translateY(12px) scale(.98)` },
+          { opacity: 1, transform: rest || 'none' }
+        ], 280);
+      } else if (Math.abs(dx) > .5 || Math.abs(dy) > .5) {
+        animateGridElement(card, [
+          { transform: `translate(${dx}px, ${dy}px) ${rest}` },
+          { transform: rest || 'none' }
+        ], 320);
+      }
+    }
+    const newHeight = els.grid.offsetHeight;
+    if (oldHeight !== newHeight) {
+      animateGridElement(els.grid, [{ height: `${oldHeight}px` }, { height: `${newHeight}px` }], 320);
+    }
+  }
+  if (animate) prunePageUrls();
 }
 
 function updatePager() {
@@ -773,24 +869,17 @@ function startDownloadAll() {
 // ---------- 删除 ----------
 
 async function deleteRecords(ids) {
+  const deletionPageSeq = pageLoadSeq;
+  const deletionQuery = els.searchInput.value.trim();
   await removeMany(ids);
   for (const id of ids) {
     selected.delete(id);
-    const url = objectUrls.get(id);
-    if (url) { URL.revokeObjectURL(url); objectUrls.delete(id); }
-    const sourceUrl = sourceObjectUrls.get(id);
-    if (sourceUrl) { URL.revokeObjectURL(sourceUrl); sourceObjectUrls.delete(id); }
   }
-  records = records.filter((r) => !ids.includes(r.id));
-  [totalRecords, totalAlbumRecords] = await Promise.all([
-    countAll(els.searchInput.value.trim(), { searchTermsForRecord }),
-    countAll('')
-  ]);
-  if (!records.length && pageOffset > 0) {
-    await loadPage(Math.max(0, pageOffset - PAGE_SIZE));
-    return;
-  }
-  applyFilter();
+  // 补齐当前页的数据，保留现有卡片和滚动位置，仅让瀑布流平滑补位。
+  const total = await countAll(deletionQuery, { searchTermsForRecord });
+  if (deletionPageSeq !== pageLoadSeq || deletionQuery !== els.searchInput.value.trim()) return;
+  const lastPageOffset = Math.max(0, (Math.ceil(total / PAGE_SIZE) - 1) * PAGE_SIZE);
+  await loadPage(Math.min(pageOffset, lastPageOffset), '', { animateDeletion: true });
 }
 
 async function deleteRecordsWithFeedback(ids) {
@@ -810,7 +899,10 @@ els.btnSelectAll.addEventListener('click', () => {
   const allSelected = visibleIds.length > 0 && visibleIds.every((id) => selected.has(id));
   if (allSelected) visibleIds.forEach((id) => selected.delete(id));
   else visibleIds.forEach((id) => selected.add(id));
-  renderGrid();
+  for (const card of els.grid.querySelectorAll(':scope > .card:not(.is-removing)')) {
+    card.classList.toggle('selected', selected.has(card.dataset.id));
+  }
+  updateSelUI();
 });
 
 els.btnDownloadSel.addEventListener('click', () => {
@@ -974,7 +1066,7 @@ els.confirmBackdrop.addEventListener('click', () => closeDeleteConfirmation(fals
 
 // ---------- 初始化 ----------
 
-async function loadPage(offset = 0, requestedId = '') {
+async function loadPage(offset = 0, requestedId = '', { animateDeletion = false } = {}) {
   const requestSeq = ++pageLoadSeq;
   const query = els.searchInput.value.trim();
   const [{ records: pageRecords, hasMore: nextPage }, total, albumTotal] = await Promise.all([
@@ -990,15 +1082,20 @@ async function loadPage(offset = 0, requestedId = '') {
     if (requested) nextRecords = [requested, ...nextRecords];
   }
   closeLightbox();
-  revokePageUrls();
-  selected.clear();
+  if (!animateDeletion) {
+    revokePageUrls();
+    selected.clear();
+  } else {
+    const nextIds = new Set(nextRecords.map(rec => rec.id));
+    for (const id of selected) if (!nextIds.has(id)) selected.delete(id);
+  }
   records = nextRecords;
   pageOffset = Math.max(0, offset);
   hasMore = nextPage;
   totalRecords = total;
   totalAlbumRecords = albumTotal;
-  applyFilter();
-  window.scrollTo({ top: 0, behavior: 'auto' });
+  applyFilter({ animate: animateDeletion });
+  if (!animateDeletion) window.scrollTo({ top: 0, behavior: 'auto' });
   if (requestedId && records.some((rec) => rec.id === requestedId)) openLightbox(requestedId);
 }
 
@@ -1068,6 +1165,7 @@ chrome.storage.local.onChanged.addListener((changes) => {
 });
 
 window.addEventListener('pagehide', () => {
+  for (const animation of cardAnimations.values()) animation.cancel();
   if (masonryLayoutFrame) cancelAnimationFrame(masonryLayoutFrame);
   clearTimeout(searchTimer);
   clearTimeout(downloadProgressTimer);

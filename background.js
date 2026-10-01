@@ -16,6 +16,8 @@ import {
   generateQianwenImageEdit,
   generateBailianTokenPlanImage,
   generateBailianTokenPlanImageEdit,
+  generateFalImage,
+  generateFalImageEdit,
   generateAtlasCloudImage,
   generateAtlasCloudImageEdit,
   generateRunningHubImage,
@@ -28,6 +30,7 @@ import {
   listModels,
   listApiMartModelCatalog,
   listOpenRouterModels,
+  listFalModels,
   listRunningHubModels,
   fetchRunningHubWorkflowTitle,
   testConnection
@@ -413,6 +416,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         }
         if (msg.payload.cfg?.preset === 'openrouter') {
           return { ok: true, ...(await listOpenRouterModels(msg.payload.cfg)) };
+        }
+        if (msg.payload.cfg?.preset === 'fal') {
+          return { ok: true, ...(await listFalModels()) };
         }
         if (['runninghub', 'runninghub_cn'].includes(msg.payload.cfg?.preset)) {
           return { ok: true, ...(await listRunningHubModels(msg.payload.cfg)) };
@@ -867,6 +873,15 @@ async function doGenerate({ prompt, ratio, selection, sourceRequestId, sourceTs,
       quality,
       resolution
     });
+  } else if (cfg.apiType === 'fal-image-v1') {
+    r = await generateFalImage({
+      cfg,
+      prompt: prompt.trim(),
+      ratio,
+      size,
+      quality,
+      resolution
+    });
   } else if (cfg.apiType === 'qianwen-image-v1') {
     r = await generateQianwenImage({
       cfg,
@@ -961,6 +976,20 @@ async function doEdit({ prompt, ratio, selection, sourceDataUrl, referenceDataUr
       sourceDataUrl,
       referenceDataUrl,
       ratio,
+      quality,
+      resolution
+    });
+  } else if (cfg.apiType === 'fal-image-v1') {
+    if (!cfg.imageEdit && !requiresSourceImage(cfg)) {
+      return { ok: false, error: '请选择 fal.ai 的图片编辑或 image-to-image 模型' };
+    }
+    r = await generateFalImageEdit({
+      cfg,
+      prompt: prompt.trim(),
+      sourceDataUrl,
+      referenceDataUrl,
+      ratio,
+      size,
       quality,
       resolution
     });

@@ -129,6 +129,7 @@ body {
   position: relative;
   width: 100%;
   padding: 16px 24px 40px;
+  overflow-anchor: none;
 }
 
 .pager {
@@ -194,6 +195,8 @@ body {
 }
 .card:hover { box-shadow: 0 6px 20px rgba(80, 70, 160, .13); transform: translateY(-2px); }
 .card.selected { outline: 2px solid #7c5cf6; outline-offset: -1px; }
+.card.is-animating { will-change: transform, opacity; }
+.card.is-removing { pointer-events: none; z-index: 2; }
 
 .card .thumb {
   width: 100%;

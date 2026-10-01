@@ -64,6 +64,7 @@ function newPlatform() {
 
 function newPresetPlatform(presetId) {
   const preset = PRESETS[presetId];
+  const models = [...(preset.models || [])];
   const visionModels = [...(preset.visionModels || [])];
   const imageModels = [...(preset.imageModels || [])];
   const imageEditModels = [...(preset.imageEditModels || [])];
@@ -75,9 +76,9 @@ function newPresetPlatform(presetId) {
     name: preset.label,
     baseUrl: preset.baseUrl,
     apiKey: '',
-    models: [...new Set([...visionModels, ...imageModels, ...disabledModels])],
+    models: [...new Set([...models, ...visionModels, ...imageModels, ...disabledModels])],
     modelAliases: { ...(preset.modelAliases || {}) },
-    modelKinds: {},
+    modelKinds: { ...(preset.modelKinds || {}) },
     imageCapabilities: {},
     visionModels,
     imageModels,
@@ -320,12 +321,13 @@ function bindPlatformCard(card, platform) {
     platform.name = preset.label;
     platform.baseUrl = preset.baseUrl;
     platform.models = [...new Set([
+      ...(preset.models || []),
       ...(preset.visionModels || []),
       ...(preset.imageModels || []),
       ...(preset.disabledModels || [])
     ])];
     platform.modelAliases = { ...(preset.modelAliases || {}) };
-    platform.modelKinds = {};
+    platform.modelKinds = { ...(preset.modelKinds || {}) };
     platform.imageCapabilities = {};
     platform.visionModels = [...(preset.visionModels || [])];
     platform.imageModels = [...(preset.imageModels || [])];
@@ -375,6 +377,9 @@ function bindPlatformCard(card, platform) {
           }
         }
       }
+      if (!['runninghub', 'runninghub_cn'].includes(platform.preset) && resp.modelAliases) {
+        platform.modelAliases = { ...(resp.modelAliases || {}), ...(platform.modelAliases || {}) };
+      }
       if (['qianwenai', 'bailian_token_plan'].includes(platform.preset)) {
         const preset = PRESETS[platform.preset];
         platform.visionModels = [...new Set([
@@ -390,7 +395,7 @@ function bindPlatformCard(card, platform) {
           ...(preset.imageEditModels || []).filter((model) => platform.models.includes(model))
         ])];
       }
-      if (platform.preset === 'openrouter' && Array.isArray(resp.imageEditModels)) {
+      if (['openrouter', 'fal'].includes(platform.preset) && Array.isArray(resp.imageEditModels)) {
         platform.imageEditModels = [...new Set(resp.imageEditModels.filter((model) => platform.models.includes(model)))];
         platform.imageCapabilities = Object.fromEntries(
           Object.entries(resp.imageCapabilities || {}).filter(([model]) => platform.models.includes(model))

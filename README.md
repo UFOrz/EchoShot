@@ -26,7 +26,7 @@ EchoShot · 拍同款是一款基于 Chrome Manifest V3 的浏览器扩展。用
 
 ## 支持的平台
 
-内置配置包括 OpenAI、ModelScope、SiliconFlow、Agnes-AI、ZenMux、RunningHUB、AtlasCloud、APImart、OpenRouter、QianwenAI 和 Aliyun Token Plan。用户也可以添加兼容接口。
+内置配置包括 OpenAI、ModelScope、SiliconFlow、Agnes-AI、ZenMux、RunningHUB（国际站与中国站）、AtlasCloud、APImart、OpenRouter、QianwenAI、Aliyun Token Plan 和 fal.ai。用户也可以添加兼容接口。
 
 不同平台和模型的功能、额度、价格、可用地区及接口行为由相应服务商决定。
 
