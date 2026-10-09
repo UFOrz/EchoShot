@@ -8,15 +8,20 @@
   // 每次补注入都先清理本版本可管理的旧实例，再建立一套新的监听，避免按钮看得见却点不动。
   const previousRuntime = globalThis.__paiTongKuanContentReady;
   try { previousRuntime?.cleanup?.(); } catch { /* 旧扩展上下文可能已失效 */ }
-  document.getElementById('ir-fab-host')?.remove();
-  document.getElementById('ir-region-capture-host')?.remove();
+  document.querySelectorAll('#ir-fab-host,#ir-region-capture-host').forEach((node) => node.remove());
   const contentRuntime = { active: true };
   globalThis.__paiTongKuanContentReady = contentRuntime;
+  // DOM 标记在不同扩展运行上下文之间共享；新实例接管后，旧监听不得重新创建按钮。
+  const OWNER_ATTRIBUTE = 'data-echoshot-magic-owner';
+  const ownerToken = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  document.documentElement.setAttribute(OWNER_ATTRIBUTE, ownerToken);
 
   const MIN_SIZE = 110; // 过小的图标/头像不处理
   const HOST_ID = 'ir-fab-host';
   const FAB_SIZE = 30;
   const FAB_INSET = 6;
+  const CONTROL_GAP = 4;
+  const SHOW_DELAY = 120;
   const PAGE_CONTROL_SELECTOR = 'button,a[href],[role="button"],[role="link"],input,select,textarea,summary,[onclick],[tabindex]:not([tabindex="-1"])';
   const PAGE_OBSTRUCTION_SELECTOR = 'iframe,object,embed';
 
@@ -24,16 +29,20 @@
   let btn = null;
   let currentImg = null;
   let hideTimer = 0;
+  let showTimer = 0;
+  let pendingImg = null;
+  let pointerOnFab = false;
   let rafId = 0;
-  let lastPositionAt = 0;
-  let lastPositionRect = '';
-  let lastPositionAvailable = false;
   let currentCorner = -1;
+  let cornerInsetOffset = 0;
+  let interiorPosition = null;
   let lastX = 0;
   let lastY = 0;
   let magicButtonVisible = true;
   let regionCaptureHost = null;
   let regionCaptureCleanup = null;
+  let regionCaptureBusy = false;
+  let regionCaptureGeneration = 0;
   let uiLanguage = 'zh';
   const contentTexts = {
     en: {
@@ -112,9 +121,15 @@
     </svg>`;
 
   function ensureFab() {
-    if (host) return;
+    if (!runtimeIsCurrent()) return;
+    document.querySelectorAll('#ir-fab-host').forEach((node) => {
+      if (node !== host) node.remove();
+    });
+    if (host?.isConnected) return;
+    pointerOnFab = false;
     host = document.createElement('div');
     host.id = HOST_ID;
+    host.setAttribute(OWNER_ATTRIBUTE, ownerToken);
     host.style.cssText =
       'position:fixed;z-index:2147483647;display:none;width:30px;height:30px;' +
       'pointer-events:none;top:0;left:0;';
@@ -146,19 +161,28 @@
     btn.className = 'fab';
     btn.type = 'button';
     btn.title = uiText('magic');
+    btn.setAttribute('aria-label', uiText('magic'));
     btn.innerHTML = WAND_SVG;
 
     btn.addEventListener('click', onFabClick, true);
     btn.addEventListener('pointerdown', (e) => e.stopPropagation(), true);
-    btn.addEventListener('mouseenter', () => clearTimeout(hideTimer));
-    btn.addEventListener('mouseleave', scheduleHide);
+    btn.addEventListener('mouseenter', () => {
+      if (!runtimeIsCurrent()) return;
+      pointerOnFab = true;
+      cancelPendingShow();
+      clearHideTimer();
+    });
+    btn.addEventListener('mouseleave', () => {
+      pointerOnFab = false;
+      scheduleHide();
+    });
 
     shadow.append(style, btn);
     (document.documentElement || document.body).appendChild(host);
   }
 
   function isPageControl(el, img) {
-    if (!(el instanceof Element) || el === host) return false;
+    if (!(el instanceof Element) || el === host || !isRenderedElement(el)) return false;
     const control = el.closest(PAGE_CONTROL_SELECTOR);
     // 图片本身可能位于链接或按钮内，这不应阻止用户选取图片。
     if (control && !control.contains(img)) return true;
@@ -175,14 +199,210 @@
     return false;
   }
 
-  function pageControlAt(x, y, img) {
-    for (const el of document.elementsFromPoint(x, y)) {
+  function imagePointStatus(x, y, img) {
+    const stack = document.elementsFromPoint(x, y);
+    const hitsImage = stack.includes(img);
+    for (const el of stack) {
       if (el === host) continue;
-      if (el.matches?.(PAGE_OBSTRUCTION_SELECTOR)) return true;
-      if (el === img) return false;
-      if (isPageControl(el, img)) return true;
+      if (isImageObstruction(el, img)) return 'blocked';
+      if (el === img) return 'clear';
+      if (isPageControl(el, img)) return 'blocked';
+      // 圆角空隙会露出卡片后方的兄弟层；仅检查图片祖先之前的前景。
+      // 命中图片时仍继续到图片，兼容链接伪元素排在图片之前的正常命中栈。
+      if (!hitsImage && el.contains(img)) return 'clipped';
     }
-    return false;
+    return 'clipped'; // 圆角等裁切区域没有命中图片，可尝试将角落位置向内移动。
+  }
+
+  function isImageObstruction(el, img) {
+    if (el === host) return false;
+    if (el.matches?.(PAGE_OBSTRUCTION_SELECTOR)) return true;
+    if (!(el instanceof Element) || el.contains(img) || img.contains(el)) return false;
+    if (!isRenderedElement(el)) return false;
+    if (isSiteImageHoverLayer(el, img)) return false;
+    // 图片卡片的透明按钮容器并未遮住图片；实际按钮仍由控件检测避让。
+    // 独立遮罩、跨卡片容器和不透明覆盖层继续阻挡图片选择。
+    return !isImageActionLayer(el, img);
+  }
+
+  function isSiteImageHoverLayer(el, img) {
+    if (el.tagName !== 'DIV') return false;
+    const pinterest = /(^|\.)pinterest\.com$/i.test(location.hostname);
+    const pexels = /(^|\.)pexels\.com$/i.test(location.hostname);
+    const layerId = el.getAttribute('data-test-id');
+    let overlay;
+    let card;
+    if (pinterest && ['pin-card-hover-overlay', 'pin-card-hover-overlay-top-wash',
+        'pin-card-hover-overlay-gradient-full'].includes(layerId)) {
+      overlay = el.closest('[data-test-id="pin-card-hover-overlay"]');
+      card = img.closest('[data-test-id="pinWrapper"]');
+      if (!overlay || !card || overlay.closest('[data-test-id="pinWrapper"]') !== card) return false;
+    } else if (pexels && [...el.classList].some((name) => name.startsWith('MediaCard_overlay__'))) {
+      overlay = el;
+      card = img.closest('article[class*="MediaCard_card__"]');
+      if (!card || overlay.closest('article') !== card ||
+          overlay.parentElement !== img.parentElement || overlay.parentElement.tagName !== 'A') return false;
+    } else return false;
+    // 仅接受已确认的单图卡片装饰层，保存/下载等并列控件仍由控件检测避让。
+    if (overlay.querySelector(`${PAGE_CONTROL_SELECTOR},${PAGE_OBSTRUCTION_SELECTOR}`)) return false;
+    const modal = overlay.closest('dialog,[role="dialog"],[aria-modal="true"]');
+    if (modal && !modal.contains(img)) return false;
+    // 长图可被卡片裁切；比较裁切后的边界，而不是未裁切 IMG 的全部高度。
+    const imageRect = clippedRect(img, false);
+    const overlayRect = clippedRect(overlay, false);
+    const layerRect = clippedRect(el, false);
+    if (Math.abs(overlayRect.left - imageRect.left) > 4 ||
+        Math.abs(overlayRect.top - imageRect.top) > 4 ||
+        Math.abs(overlayRect.right - imageRect.right) > 4 ||
+        Math.abs(overlayRect.bottom - imageRect.bottom) > 4 ||
+        layerRect.width <= 0 || layerRect.height <= 0 ||
+        layerRect.left < overlayRect.left - 4 || layerRect.top < overlayRect.top - 4 ||
+        layerRect.right > overlayRect.right + 4 || layerRect.bottom > overlayRect.bottom + 4) return false;
+    for (const other of card.querySelectorAll('img')) {
+      if (other === img) continue;
+      const rect = other.getBoundingClientRect();
+      if (rect.width >= MIN_SIZE && rect.height >= MIN_SIZE && isRenderedElement(other)) return false;
+    }
+    // pointer-events:none 的绘制层不会出现在命中栈中，也要检查整个装饰层。
+    for (const node of [overlay, ...overlay.querySelectorAll('*')]) {
+      const style = getComputedStyle(node);
+      if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') continue;
+      const nodeId = node.getAttribute('data-test-id');
+      if ((style.backdropFilter && style.backdropFilter !== 'none') || paintAlpha(style.backgroundColor) >= 1) return false;
+      if (!(pexels && node === overlay) &&
+          !['pin-card-hover-overlay-top-wash', 'pin-card-hover-overlay-gradient-full'].includes(nodeId) &&
+          hasLayerPaint(style)) return false;
+      if (style.backgroundImage !== 'none') {
+        const colors = style.backgroundImage.match(/rgba?\([^)]*\)/g) || [];
+        if ((!(pexels && node === overlay) && nodeId !== 'pin-card-hover-overlay-gradient-full') ||
+            !style.backgroundImage.startsWith('linear-gradient(') || colors.length < 2 ||
+            colors.some((color) => paintAlpha(color) >= 1)) return false;
+      }
+      for (const pseudo of ['::before', '::after']) {
+        const pseudoStyle = getComputedStyle(node, pseudo);
+        if (!['none', 'normal', ''].includes(pseudoStyle.content) &&
+            pseudoStyle.display !== 'none' && pseudoStyle.visibility !== 'hidden' &&
+            pseudoStyle.opacity !== '0' && hasLayerPaint(pseudoStyle)) return false;
+      }
+    }
+    return true;
+  }
+
+  function isImageActionLayer(el, img) {
+    if (el.matches(PAGE_CONTROL_SELECTOR)) return false;
+    const modal = el.closest('dialog,[role="dialog"],[aria-modal="true"]');
+    if (modal && !modal.contains(img)) return false;
+    const style = getComputedStyle(el);
+    if (hasLayerPaint(style)) return false;
+    // 命中检测不会单独返回伪元素，容器的伪元素也可能绘制真正的遮罩。
+    for (const pseudo of ['::before', '::after']) {
+      const pseudoStyle = getComputedStyle(el, pseudo);
+      if (!['none', 'normal', ''].includes(pseudoStyle.content) &&
+          pseudoStyle.display !== 'none' && pseudoStyle.visibility !== 'hidden' &&
+          pseudoStyle.opacity !== '0' && hasLayerPaint(pseudoStyle)) return false;
+    }
+    let card = el.parentElement;
+    while (card && !card.contains(img)) card = card.parentElement;
+    if (!card || card === document.body || card === document.documentElement) return false;
+    const imageRect = img.getBoundingClientRect();
+    const cardRect = card.getBoundingClientRect();
+    const layerRect = el.getBoundingClientRect();
+    if (cardRect.width > imageRect.width + 80 || cardRect.height > imageRect.height + 120 ||
+        layerRect.width <= 0 || layerRect.height <= 0 ||
+        layerRect.left < imageRect.left - 12 || layerRect.top < imageRect.top - 12 ||
+        layerRect.right > cardRect.right + 12 || layerRect.bottom > cardRect.bottom + 12) return false;
+    for (const other of card.querySelectorAll('img')) {
+      if (other === img) continue;
+      const rect = other.getBoundingClientRect();
+      if (rect.width >= MIN_SIZE && rect.height >= MIN_SIZE && isRenderedElement(other)) return false;
+    }
+    return [...el.querySelectorAll(`${PAGE_CONTROL_SELECTOR},[aria-label],[title]`)].some((control) => {
+      const rect = control.getBoundingClientRect();
+      return rect.width > 0 && rect.width <= 160 && rect.height > 0 && rect.height <= 96 &&
+        rect.left >= cardRect.left - 12 && rect.top >= cardRect.top - 12 &&
+        rect.right <= cardRect.right + 12 && rect.bottom <= cardRect.bottom + 12 &&
+        isPageControl(control, img);
+    });
+  }
+
+  function hasLayerPaint(style) {
+    return paintAlpha(style.backgroundColor) !== 0 || style.backgroundImage !== 'none' ||
+      (style.backdropFilter && style.backdropFilter !== 'none');
+  }
+
+  function paintAlpha(color) {
+    if (color === 'transparent') return 0;
+    const comma = color.match(/^rgba\([^)]*,\s*(\d*\.?\d+)\)$/);
+    const slash = color.match(/^[\w-]+\([^)]*\/\s*(\d*\.?\d+)(%)?\)$/);
+    if (comma) return Number(comma[1]);
+    if (slash) return Number(slash[1]) / (slash[2] ? 100 : 1);
+    return 1;
+  }
+
+  function clippedRect(el, viewport = true) {
+    const rect = el.getBoundingClientRect();
+    let { left, top, right, bottom } = rect;
+    if (viewport) {
+      left = Math.max(left, 0);
+      top = Math.max(top, 0);
+      right = Math.min(right, window.innerWidth);
+      bottom = Math.min(bottom, window.innerHeight);
+    }
+    for (let parent = el.parentElement; parent && parent !== document.documentElement; parent = parent.parentElement) {
+      const style = getComputedStyle(parent);
+      const containPaint = /\b(paint|content|strict)\b/.test(style.contain);
+      const clipX = containPaint || /^(hidden|clip|scroll|auto)$/.test(style.overflowX);
+      const clipY = containPaint || /^(hidden|clip|scroll|auto)$/.test(style.overflowY);
+      if (!clipX && !clipY) continue;
+      const box = parent.getBoundingClientRect();
+      const scaleX = parent.offsetWidth ? box.width / parent.offsetWidth : 1;
+      const scaleY = parent.offsetHeight ? box.height / parent.offsetHeight : 1;
+      if (clipX) {
+        left = Math.max(left, box.left + parent.clientLeft * scaleX);
+        right = Math.min(right, box.left + (parent.clientLeft + parent.clientWidth) * scaleX);
+      }
+      if (clipY) {
+        top = Math.max(top, box.top + parent.clientTop * scaleY);
+        bottom = Math.min(bottom, box.top + (parent.clientTop + parent.clientHeight) * scaleY);
+      }
+    }
+    return { left, top, right, bottom, width: Math.max(0, right - left), height: Math.max(0, bottom - top) };
+  }
+
+  function isRenderedElement(el) {
+    const visibility = getComputedStyle(el).visibility;
+    if (visibility === 'hidden' || visibility === 'collapse') return false;
+    for (let node = el; node; node = node.parentElement) {
+      const style = getComputedStyle(node);
+      if (style.display === 'none' || style.opacity === '0') return false;
+    }
+    return true;
+  }
+
+  function imageActionContainer(img) {
+    const known = img.closest('[data-test-id="pinWrapper"],article[class*="MediaCard_card__"]');
+    if (known) return known;
+    const imageRect = img.getBoundingClientRect();
+    let container = img.parentElement;
+    for (let parent = container?.parentElement; parent && parent !== document.body &&
+        parent !== document.documentElement; parent = parent.parentElement) {
+      const rect = parent.getBoundingClientRect();
+      if (rect.width > imageRect.width + 80 || rect.height > imageRect.height + 120) break;
+      container = parent;
+    }
+    return container || img;
+  }
+
+  function imageControlRects(img) {
+    const container = imageActionContainer(img);
+    const controls = container.querySelectorAll(`${PAGE_CONTROL_SELECTOR},[aria-label],[title]`);
+    const rects = [];
+    for (const control of controls) {
+      if (control === img || control.contains(img) || !isRenderedElement(control) || !isPageControl(control, img)) continue;
+      const rect = clippedRect(control);
+      if (rect.width > 0 && rect.height > 0) rects.push(rect);
+    }
+    return rects;
   }
 
   // 找到坐标下第一张足够大的 <img>，但不穿过网页上的可交互控件。
@@ -196,8 +416,8 @@
         const src = el.currentSrc || el.src;
         if (!src) continue;
         const r = el.getBoundingClientRect();
-        if (r.width >= MIN_SIZE && r.height >= MIN_SIZE) {
-          return foreground.some((item) => isPageControl(item, el)) ? null : el;
+        if (r.width >= MIN_SIZE && r.height >= MIN_SIZE && isRenderedElement(el)) {
+          return foreground.some((item) => isImageObstruction(item, el) || isPageControl(item, el)) ? null : el;
         }
       }
       foreground.push(el);
@@ -205,81 +425,169 @@
     return null;
   }
 
-  function positionFab(img, force = false) {
-    const r = img.getBoundingClientRect();
-    const rectKey = [r.left, r.top, r.right, r.bottom, window.innerWidth, window.innerHeight].join(',');
-    const now = performance.now();
-    if (!force && rectKey === lastPositionRect && now - lastPositionAt < 120) return lastPositionAvailable;
-    lastPositionAt = now;
-    lastPositionRect = rectKey;
-    const left = Math.max(0, r.left);
-    const top = Math.max(0, r.top);
-    const right = Math.min(window.innerWidth, r.right);
-    const bottom = Math.min(window.innerHeight, r.bottom);
-    if (right - left < FAB_SIZE + FAB_INSET * 2 || bottom - top < FAB_SIZE + FAB_INSET * 2) {
-      lastPositionAvailable = false;
+  function positionFab(img) {
+    const r = clippedRect(img);
+    if (!isRenderedElement(img) || r.width < FAB_SIZE + FAB_INSET * 2 || r.height < FAB_SIZE + FAB_INSET * 2) {
       return false;
     }
-    const corners = [
-      [right - FAB_SIZE - FAB_INSET, top + FAB_INSET],
-      [left + FAB_INSET, top + FAB_INSET],
-      [right - FAB_SIZE - FAB_INSET, bottom - FAB_SIZE - FAB_INSET],
-      [left + FAB_INSET, bottom - FAB_SIZE - FAB_INSET]
+    const minX = r.left + FAB_INSET;
+    const minY = r.top + FAB_INSET;
+    const maxX = r.right - FAB_SIZE - FAB_INSET;
+    const maxY = r.bottom - FAB_SIZE - FAB_INSET;
+    const midX = (minX + maxX) / 2;
+    const midY = (minY + maxY) / 2;
+    const edges = [
+      [maxX, minY], [minX, minY], [maxX, maxY], [minX, maxY],
+      [maxX, midY], [minX, midY], [midX, minY], [midX, maxY]
     ];
-    const cornerOrder = [0, 1, 2, 3];
-    if (currentCorner >= 0) cornerOrder.unshift(...cornerOrder.splice(currentCorner, 1));
+    const candidates = edges.map(([x, y], index) => ({ x, y, index }));
+    if (currentCorner >= 0 && currentCorner < edges.length) {
+      candidates.unshift(...candidates.splice(currentCorner, 1));
+    } else if (interiorPosition) {
+      candidates.unshift({ x: minX + (maxX - minX) * interiorPosition.x,
+        y: minY + (maxY - minY) * interiorPosition.y, index: 8 });
+    }
+    const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
+    // 所有边缘被占用时，尝试鼠标首次停留点附近和内部空位；显示后保存相对位置。
+    for (const [dx, dy] of [[40, 0], [-70, 0], [0, 40], [0, -70]]) {
+      candidates.push({ x: clamp(lastX + dx, minX, maxX), y: clamp(lastY + dy, minY, maxY), index: 8 });
+    }
+    for (const yRatio of [.5, .25, .75]) {
+      for (const xRatio of [.5, .25, .75]) {
+        candidates.push({ x: minX + (maxX - minX) * xRatio,
+          y: minY + (maxY - minY) * yRatio, index: 8 });
+      }
+    }
+    const controlRects = imageControlRects(img);
+    const seen = new Set();
     const previousPointerEvents = btn.style.pointerEvents;
     btn.style.pointerEvents = 'none';
     try {
-      for (const corner of cornerOrder) {
-        const [x, y] = corners[corner];
-        const xs = [x - 3, x + FAB_SIZE / 2, x + FAB_SIZE + 3];
-        const ys = [y - 3, y + FAB_SIZE / 2, y + FAB_SIZE + 3];
-        if (xs.some((sampleX) => ys.some((sampleY) =>
-          pageControlAt(Math.max(0, Math.min(window.innerWidth - 1, sampleX)),
-            Math.max(0, Math.min(window.innerHeight - 1, sampleY)), img)))) continue;
-        host.style.left = x + 'px';
-        host.style.top = y + 'px';
-        currentCorner = corner;
-        lastPositionAvailable = true;
-        return true;
+      const placementStatus = (x, y) => {
+        if (controlRects.some((control) => x - CONTROL_GAP < control.right &&
+            x + FAB_SIZE + CONTROL_GAP > control.left && y - CONTROL_GAP < control.bottom &&
+            y + FAB_SIZE + CONTROL_GAP > control.top)) return 'blocked';
+        const xs = [x - CONTROL_GAP, x + FAB_SIZE / 2, x + FAB_SIZE + CONTROL_GAP];
+        const ys = [y - CONTROL_GAP, y + FAB_SIZE / 2, y + FAB_SIZE + CONTROL_GAP];
+        let result = 'clear';
+        for (const sampleX of xs) {
+          for (const sampleY of ys) {
+            const status = imagePointStatus(sampleX, sampleY, img);
+            if (status === 'blocked') return status;
+            if (status === 'clipped') result = status;
+          }
+        }
+        return result;
+      };
+      candidateLoop:
+      for (const { x, y, index } of candidates) {
+        const key = `${x},${y}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const baseStatus = placementStatus(x, y);
+        if (baseStatus === 'blocked') continue;
+        const offsets = [];
+        if (index < 4 && index === currentCorner && cornerInsetOffset > 0) offsets.push(cornerInsetOffset);
+        if (baseStatus === 'clear') offsets.push(0);
+        else if (index < 4) offsets.push(2, 4, 8, 12, 16);
+        // 仅几何裁切允许角落内移；真实控件或遮罩阻挡时直接改用下一位置。
+        for (const offset of new Set(offsets)) {
+          const placedX = x + (index % 2 ? offset : -offset);
+          const placedY = y + (index < 2 ? offset : -offset);
+          if (placedX < minX || placedX > maxX || placedY < minY || placedY > maxY) continue;
+          const status = offset === 0 ? baseStatus : placementStatus(placedX, placedY);
+          if (status === 'blocked') continue candidateLoop;
+          if (status !== 'clear') continue;
+          host.style.left = placedX + 'px';
+          host.style.top = placedY + 'px';
+          currentCorner = index;
+          cornerInsetOffset = index < 4 ? offset : 0;
+          interiorPosition = index === 8 ? {
+            x: maxX === minX ? .5 : (placedX - minX) / (maxX - minX),
+            y: maxY === minY ? .5 : (placedY - minY) / (maxY - minY)
+          } : null;
+          return true;
+        }
       }
     } finally {
       btn.style.pointerEvents = previousPointerEvents;
     }
-    lastPositionAvailable = false;
     return false;
   }
 
-  function show(img) {
-    if (!magicButtonVisible) return;
-    ensureFab();
-    if (currentImg !== img) {
-      currentImg = img;
-      host.style.display = 'none'; // 避免闪动，先定位再显示
-      lastPositionAt = 0;
-      currentCorner = -1;
-    }
-    host.style.display = positionFab(img) ? 'block' : 'none';
+  function runtimeIsCurrent() {
+    if (!contentRuntime.active) return false;
+    if (document.documentElement.getAttribute(OWNER_ATTRIBUTE) === ownerToken) return true;
+    cleanupRuntime();
+    return false;
+  }
+
+  function clearHideTimer() {
     clearTimeout(hideTimer);
+    hideTimer = 0;
+  }
+
+  function cancelPendingShow() {
+    clearTimeout(showTimer);
+    showTimer = 0;
+    pendingImg = null;
+  }
+
+  function resetPosition() {
+    currentCorner = -1;
+    cornerInsetOffset = 0;
+    interiorPosition = null;
+  }
+
+  function renderFab(img) {
+    if (!runtimeIsCurrent() || !img.isConnected || !magicButtonVisible || regionCaptureBusy) return;
+    ensureFab();
+    host.style.display = positionFab(img) ? 'block' : 'none';
+    clearHideTimer();
+  }
+
+  function show(img) {
+    if (!runtimeIsCurrent() || !magicButtonVisible || regionCaptureBusy) return;
+    clearHideTimer();
+    if (currentImg === img) {
+      renderFab(img);
+      return;
+    }
+    if (pendingImg === img) return;
+    cancelPendingShow();
+    currentImg = null;
+    pointerOnFab = false;
+    if (host) host.style.display = 'none';
+    resetPosition();
+    pendingImg = img;
+    showTimer = setTimeout(() => {
+      const target = pendingImg;
+      showTimer = 0;
+      pendingImg = null;
+      if (!runtimeIsCurrent() || !target?.isConnected || !magicButtonVisible || regionCaptureBusy ||
+          findImgAt(lastX, lastY) !== target) return;
+      currentImg = target;
+      renderFab(target);
+    }, SHOW_DELAY);
   }
 
   function hide() {
-    clearTimeout(hideTimer);
+    clearHideTimer();
+    cancelPendingShow();
     currentImg = null;
-    lastPositionAt = 0;
-    currentCorner = -1;
+    pointerOnFab = false;
+    resetPosition();
     if (host) host.style.display = 'none';
   }
 
   function scheduleHide() {
-    clearTimeout(hideTimer);
+    if (hideTimer) return;
     hideTimer = setTimeout(hide, 300);
   }
 
   function refreshMagicButton() {
-    if (!contentRuntime.active) return;
-    if (!magicButtonVisible) {
+    if (!runtimeIsCurrent()) return;
+    if (!magicButtonVisible || regionCaptureBusy) {
       hide();
       return;
     }
@@ -288,8 +596,9 @@
     else hide();
   }
 
-  // rAF 节流的鼠标追踪
+  // rAF 节流的鼠标追踪；进入按钮后保持当前图片和位置。
   function onMouseMove(e) {
+    if (!runtimeIsCurrent()) return;
     lastX = e.clientX;
     lastY = e.clientY;
     if (!rafId) rafId = requestAnimationFrame(tick);
@@ -297,10 +606,27 @@
 
   function tick() {
     rafId = 0;
+    if (!runtimeIsCurrent() || regionCaptureBusy) return;
+    if (!magicButtonVisible) { hide(); return; }
+    if (host) ensureFab();
     const img = findImgAt(lastX, lastY);
+    if (pointerOnFab && host?.style.display === 'block') {
+      if (img === currentImg && currentImg?.isConnected) clearHideTimer();
+      else hide();
+      return;
+    }
     if (img) show(img);
-    else if (currentImg && pageControlAt(lastX, lastY, currentImg)) hide();
-    else if (currentImg) scheduleHide();
+    else {
+      cancelPendingShow();
+      if (!currentImg) return;
+      const rect = clippedRect(currentImg);
+      const insideImage = lastX >= rect.left && lastX < rect.right && lastY >= rect.top && lastY < rect.bottom;
+      const foreground = document.elementsFromPoint(lastX, lastY).filter((el) => el !== host);
+      const modal = foreground.some((el) => el.closest?.('dialog,[role="dialog"],[aria-modal="true"]'));
+      if (modal || (insideImage && foreground.some((el) =>
+          isImageObstruction(el, currentImg) && !isPageControl(el, currentImg)))) hide();
+      else scheduleHide();
+    }
   }
 
   function onFabClick(e) {
@@ -309,6 +635,8 @@
     e.stopImmediatePropagation();
     const img = currentImg;
     if (!img) return;
+    if (!runtimeIsCurrent() || !img.isConnected || !magicButtonVisible || regionCaptureBusy) return;
+    if (findImgAt(lastX, lastY) !== img) { hide(); return; }
     const src = img.currentSrc || img.src;
     const payload = { src, previewUrl: src, pageUrl: location.href, pageTitle: document.title };
     // 第一时间通知后台打开侧边栏，不能在此之前执行 Canvas 或任何 await。
@@ -354,6 +682,8 @@
 
   function startRegionCapture() {
     regionCaptureCleanup?.();
+    const captureGeneration = ++regionCaptureGeneration;
+    regionCaptureBusy = true;
     hide();
 
     const captureHost = document.createElement('div');
@@ -382,13 +712,21 @@
     let startY = 0;
     let selecting = false;
 
-    const cleanup = () => {
+    const finishCapture = () => {
+      if (captureGeneration !== regionCaptureGeneration) return;
+      regionCaptureBusy = false;
+      refreshMagicButton();
+    };
+    const captureIsCurrent = () => runtimeIsCurrent() && captureGeneration === regionCaptureGeneration;
+    const cleanup = (resumeMagic = true) => {
       window.removeEventListener('keydown', onKeyDown, true);
       captureHost.remove();
       if (regionCaptureHost === captureHost) regionCaptureHost = null;
       if (regionCaptureCleanup === cleanup) regionCaptureCleanup = null;
+      if (resumeMagic) finishCapture();
     };
     const onKeyDown = (event) => {
+      if (!captureIsCurrent()) return;
       if (event.key !== 'Escape') return;
       event.preventDefault();
       event.stopPropagation();
@@ -437,39 +775,51 @@
         overlay.querySelector('.tip').textContent = uiText('small');
         return;
       }
-      cleanup();
+      cleanup(false);
+      const viewportWidth = window.innerWidth;
+      const viewportHeight = window.innerHeight;
       requestAnimationFrame(() => requestAnimationFrame(() => {
+        if (!captureIsCurrent()) return;
         chrome.runtime.sendMessage({
           type: 'ir.captureRegion',
-          payload: { rect, viewportWidth: window.innerWidth, viewportHeight: window.innerHeight }
+          payload: { rect, viewportWidth, viewportHeight }
         }, (response) => {
           const message = chrome.runtime.lastError?.message;
+          if (!captureIsCurrent()) return;
           if (message || !response?.ok || !response.dataUrl) {
+            finishCapture();
             showPageNotice(uiFormat('captureFailed', {
               error: localizeCaptureError(message || response?.error || uiText('noScreenshot'))
             }), true);
             return;
           }
-          void cropRegionScreenshot(response.dataUrl, rect, window.innerWidth, window.innerHeight)
-            .then((cropped) => chrome.runtime.sendMessage({
-              type: 'ir.submitRegionCapture',
-              payload: cropped
-            }, (submitResponse) => {
-              const submitError = chrome.runtime.lastError?.message;
-              if (submitError || !submitResponse?.ok) {
-                showPageNotice(uiFormat('saveFailed', {
-                  error: localizeCaptureError(submitError || submitResponse?.error || uiText('unknown'))
-                }), true);
-              } else {
-                showPageNotice(uiFormat('captured', {
-                  width: submitResponse.width,
-                  height: submitResponse.height
-                }));
-              }
-            }))
-            .catch((error) => showPageNotice(uiFormat('cropFailed', {
-              error: localizeCaptureError(error)
-            }), true));
+          void cropRegionScreenshot(response.dataUrl, rect, viewportWidth, viewportHeight)
+            .then((cropped) => {
+              if (!captureIsCurrent()) return;
+              return chrome.runtime.sendMessage({
+                type: 'ir.submitRegionCapture',
+                payload: cropped
+              }, (submitResponse) => {
+                const submitError = chrome.runtime.lastError?.message;
+                if (!captureIsCurrent()) return;
+                finishCapture();
+                if (submitError || !submitResponse?.ok) {
+                  showPageNotice(uiFormat('saveFailed', {
+                    error: localizeCaptureError(submitError || submitResponse?.error || uiText('unknown'))
+                  }), true);
+                } else {
+                  showPageNotice(uiFormat('captured', {
+                    width: submitResponse.width,
+                    height: submitResponse.height
+                  }));
+                }
+              });
+            })
+            .catch((error) => {
+              if (!captureIsCurrent()) return;
+              finishCapture();
+              showPageNotice(uiFormat('cropFailed', { error: localizeCaptureError(error) }), true);
+            });
         });
       }));
     }, true);
@@ -515,15 +865,23 @@
 
   // 右键菜单发生在后台；尽量回到页面上下文复用已经解码的图片。
   function onRuntimeMessage(msg, _sender, sendResponse) {
+    if (!runtimeIsCurrent()) return false;
     if (msg?.type === 'ir.startRegionCapture') {
       startRegionCapture();
       sendResponse({ ok: true });
       return;
     }
     if (msg?.type === 'ir.cancelRegionCapture') {
-      const cancelled = Boolean(regionCaptureCleanup);
-      regionCaptureCleanup?.();
-      if (cancelled) showPageNotice(uiText('cancelled'));
+      const cancelled = regionCaptureBusy || Boolean(regionCaptureCleanup);
+      if (cancelled) {
+        // 松开鼠标后选择层已移除，截图或裁切仍可能在等待异步回调。
+        // 取消整个捕获代次，避免迟到的回调继续提交已经取消的截图。
+        regionCaptureGeneration += 1;
+        regionCaptureCleanup?.(false);
+        regionCaptureBusy = false;
+        refreshMagicButton();
+        showPageNotice(uiText('cancelled'));
+      }
       sendResponse({ ok: true, cancelled });
       return;
     }
@@ -555,15 +913,20 @@
 
   // 滚动 / 缩放时重新定位，图片滚出视口则隐藏
   function onScrollOrResize() {
-    if (!currentImg || !host) return;
+    if (!runtimeIsCurrent() || regionCaptureBusy) return;
+    if (!currentImg || !host) {
+      cancelPendingShow();
+      refreshMagicButton();
+      return;
+    }
     if (!document.contains(currentImg)) { hide(); return; }
-    const r = currentImg.getBoundingClientRect();
-    if (r.bottom < -20 || r.top > window.innerHeight + 20 ||
-        r.right < -20 || r.left > window.innerWidth + 20) {
+    const r = clippedRect(currentImg);
+    if (r.width <= 0 || r.height <= 0) {
       hide();
       return;
     }
-    host.style.display = positionFab(currentImg, true) ? 'block' : 'none';
+    ensureFab();
+    host.style.display = positionFab(currentImg) ? 'block' : 'none';
   }
 
   document.addEventListener('mousemove', onMouseMove, { passive: true, capture: true });
@@ -572,33 +935,61 @@
 
   function cleanupRuntime() {
     contentRuntime.active = false;
-    clearTimeout(hideTimer);
+    clearHideTimer();
+    cancelPendingShow();
     if (rafId) cancelAnimationFrame(rafId);
     document.removeEventListener('mousemove', onMouseMove, true);
     window.removeEventListener('scroll', onScrollOrResize, true);
     window.removeEventListener('resize', onScrollOrResize);
-    window.removeEventListener('pagehide', cleanupRuntime);
+    window.removeEventListener('pagehide', onPageHide);
+    window.removeEventListener('pageshow', onPageShow);
     regionCaptureCleanup?.();
     try { chrome.runtime.onMessage.removeListener(onRuntimeMessage); } catch { /* 扩展更新期间忽略 */ }
     host?.remove();
     host = null;
     btn = null;
     currentImg = null;
+    pointerOnFab = false;
+    if (document.documentElement.getAttribute(OWNER_ATTRIBUTE) === ownerToken) {
+      document.documentElement.removeAttribute(OWNER_ATTRIBUTE);
+    }
     if (globalThis.__paiTongKuanContentReady === contentRuntime) {
       delete globalThis.__paiTongKuanContentReady;
     }
   }
 
   contentRuntime.cleanup = cleanupRuntime;
-  window.addEventListener('pagehide', cleanupRuntime);
+  function onPageHide(event) {
+    // 返回缓存会恢复同一内容脚本；保留监听，避免返回网页后按钮永久失效。
+    if (event.persisted) {
+      hide();
+      regionCaptureCleanup?.(false);
+      regionCaptureGeneration += 1;
+      regionCaptureBusy = false;
+      return;
+    }
+    cleanupRuntime();
+  }
+  function onPageShow(event) {
+    if (event.persisted) loadUiPrefs();
+  }
+  window.addEventListener('pagehide', onPageHide);
+  window.addEventListener('pageshow', onPageShow);
 
-  try {
-    chrome.runtime.sendMessage({ type: 'ir.getUiPrefs' }, (resp) => {
-      void chrome.runtime.lastError;
-      magicButtonVisible = resp?.visible !== false;
-      uiLanguage = ['zh', 'en', 'ja', 'ko'].includes(resp?.language) ? resp.language : 'en';
-      if (btn) btn.title = uiText('magic');
-      refreshMagicButton();
-    });
-  } catch { /* 扩展更新期间忽略 */ }
+  function loadUiPrefs() {
+    try {
+      chrome.runtime.sendMessage({ type: 'ir.getUiPrefs' }, (resp) => {
+        void chrome.runtime.lastError;
+        if (!runtimeIsCurrent()) return;
+        magicButtonVisible = resp?.visible !== false;
+        uiLanguage = ['zh', 'en', 'ja', 'ko'].includes(resp?.language) ? resp.language : 'en';
+        if (btn) {
+          btn.title = uiText('magic');
+          btn.setAttribute('aria-label', uiText('magic'));
+        }
+        refreshMagicButton();
+      });
+    } catch { /* 扩展更新期间忽略 */ }
+  }
+  loadUiPrefs();
 })();

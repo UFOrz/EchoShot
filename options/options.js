@@ -34,6 +34,7 @@ let saving = false;
 let dirty = false;
 let savedTagTimer = 0;
 const platformStatus = new Map();
+const pendingModelFetches = new Map();
 const pendingWorkflowAliasLookups = new Map();
 const ui = (key, vars = {}) => t(key, vars, currentLanguage);
 const presetLabel = (presetId) => ui(PRESETS[presetId]?.label || '自定义平台');
@@ -312,11 +313,24 @@ function updatePlatformStatus(platform, message) {
   if (label) label.textContent = status;
 }
 
+function platformRequestConfig(platform) {
+  return { preset: platform.preset, baseUrl: platform.baseUrl, apiKey: platform.apiKey };
+}
+
+function platformRequestMatches(platform, cfg) {
+  return state.platforms.includes(platform)
+    && platform.preset === cfg.preset
+    && platform.baseUrl === cfg.baseUrl
+    && platform.apiKey === cfg.apiKey;
+}
+
 function fetchManualWorkflowAlias(platform, model) {
   if (!isRunningHubPreset(platform.preset) || !/^workflow\/\d+$/.test(model)) return;
   const key = `${platform.id}\n${model}`;
-  if (pendingWorkflowAliasLookups.has(key) || String(platform.modelAliases?.[model] || '').trim()) return;
-  const lookup = { edited: false, promise: null };
+  const pendingLookup = pendingWorkflowAliasLookups.get(key);
+  if ((pendingLookup?.platform === platform && platformRequestMatches(platform, pendingLookup.cfg))
+    || String(platform.modelAliases?.[model] || '').trim()) return;
+  const lookup = { platform, edited: false, promise: null, cfg: platformRequestConfig(platform) };
   pendingWorkflowAliasLookups.set(key, lookup);
   updatePlatformStatus(platform, '正在获取工作流名称…');
   const card = [...$('platformDetail').querySelectorAll('.platform-card')]
@@ -330,16 +344,16 @@ function fetchManualWorkflowAlias(platform, model) {
     try {
       const response = await chrome.runtime.sendMessage({
         type: 'ir.runningHubWorkflowTitle',
-        payload: { preset: platform.preset, model }
+        payload: { preset: lookup.cfg.preset, model }
       });
       if (response?.ok) title = String(response.title || '').trim();
     } catch { /* 公开页面不可读时仍保留手动添加的工作流。 */ }
     if (!title) {
-      title = String(PRESETS[platform.preset]?.modelAliases?.[model] || '').trim();
+      title = String(PRESETS[lookup.cfg.preset]?.modelAliases?.[model] || '').trim();
       usedPresetAlias = Boolean(title);
     }
     if (pendingWorkflowAliasLookups.get(key) !== lookup
-      || !state.platforms.includes(platform)
+      || !platformRequestMatches(platform, lookup.cfg)
       || !isRunningHubPreset(platform.preset)
       || !platform.models.includes(model)
       || lookup.edited) return;
@@ -360,8 +374,10 @@ function fetchManualWorkflowAlias(platform, model) {
     refreshSaveState();
     updatePlatformStatus(platform, usedPresetAlias ? '已填入内置工作流名称' : '已自动填入工作流名称');
   })().finally(() => {
-    if (button?.isConnected) button.disabled = false;
-    if (pendingWorkflowAliasLookups.get(key) === lookup) pendingWorkflowAliasLookups.delete(key);
+    if (pendingWorkflowAliasLookups.get(key) === lookup) {
+      if (button?.isConnected) button.disabled = false;
+      pendingWorkflowAliasLookups.delete(key);
+    }
   });
 }
 
@@ -369,6 +385,14 @@ function bindPlatformCard(card, platform) {
   card.querySelectorAll('[data-field]').forEach((input) => {
     input.addEventListener('input', () => {
       platform[input.dataset.field] = input.value;
+      if (input.dataset.field === 'baseUrl' || input.dataset.field === 'apiKey') {
+        platformStatus.delete(platform.id);
+        card.querySelector('.platform-status').textContent = '';
+        const fetchButton = card.querySelector('.fetch-models');
+        fetchButton.disabled = false;
+        fetchButton.textContent = ui('自动获取模型');
+        card.querySelectorAll('.model-alias-fetch').forEach((button) => { button.disabled = false; });
+      }
       if (input.dataset.field === 'name') renderPlatformNav();
       refreshSaveState();
     });
@@ -420,15 +444,21 @@ function bindPlatformCard(card, platform) {
       showToast(ui('请先填写 Base URL 和 API Key'));
       return;
     }
-    e.currentTarget.disabled = true;
+    const button = e.currentTarget;
+    const request = { cfg: platformRequestConfig(platform) };
+    pendingModelFetches.set(platform.id, request);
+    const isCurrentRequest = () => pendingModelFetches.get(platform.id) === request
+      && platformRequestMatches(platform, request.cfg);
+    button.disabled = true;
     platformStatus.set(platform.id, ui('正在获取…'));
-    e.currentTarget.textContent = ui('获取中…');
+    button.textContent = ui('获取中…');
     try {
       const resp = await chrome.runtime.sendMessage({
         type: 'ir.listModels', payload: {
-          cfg: { preset: platform.preset, baseUrl: platform.baseUrl, apiKey: platform.apiKey }
+          cfg: request.cfg
         }
       });
+      if (!isCurrentRequest()) return;
       if (!resp?.ok) throw new Error(resp?.error || ui('获取失败'));
       let added = 0;
       if (platform.preset === 'runninghub_cn') {
@@ -482,9 +512,19 @@ function bindPlatformCard(card, platform) {
           })
         : ui('已获取 {total} 个，新增 {added} 个', { total: resp.models?.length || 0, added }));
     } catch (error) {
+      if (!isCurrentRequest()) return;
       platformStatus.set(platform.id, ui('获取失败：{error}', { error: error?.message || error }));
+    } finally {
+      const current = isCurrentRequest();
+      if (pendingModelFetches.get(platform.id) === request) {
+        pendingModelFetches.delete(platform.id);
+        if (button.isConnected) {
+          button.disabled = false;
+          button.textContent = ui('自动获取模型');
+        }
+      }
+      if (current) renderPlatforms();
     }
-    renderPlatforms();
   });
   card.querySelector('.add-model').addEventListener('click', () => {
     const input = card.querySelector('.manual-model');
@@ -623,6 +663,10 @@ function collectSettings() {
 }
 
 function applySettingsToForm(settings) {
+  // 导入会替换平台对象，旧请求不能参与新配置的去重、保存等待或状态展示。
+  pendingModelFetches.clear();
+  pendingWorkflowAliasLookups.clear();
+  platformStatus.clear();
   state = settings;
   $('interfaceLanguage').value = state.language || 'auto';
   currentLanguage = resolveLanguage(state.language);

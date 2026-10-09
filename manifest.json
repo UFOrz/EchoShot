@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "EchoShot · 拍同款",
-  "version": "2.5.9",
+  "version": "2.6.7",
   "description": "悬停网页图片，一键反推 AI 提示词并生成同款图片，内置相册管理历史作品。",
   "minimum_chrome_version": "116",
   "icons": {
@@ -19,8 +19,16 @@
       "128": "icons/icon128.png"
     }
   },
-  "permissions": ["storage", "unlimitedStorage", "sidePanel", "contextMenus", "scripting"],
-  "host_permissions": ["<all_urls>"],
+  "permissions": [
+    "storage",
+    "unlimitedStorage",
+    "sidePanel",
+    "contextMenus",
+    "scripting"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
   "background": {
     "service_worker": "background.js",
     "type": "module"
@@ -31,8 +39,13 @@
   "options_page": "options/options.html",
   "content_scripts": [
     {
-      "matches": ["https://*/*", "http://*/*"],
-      "js": ["content/content.js"],
+      "matches": [
+        "https://*/*",
+        "http://*/*"
+      ],
+      "js": [
+        "content/content.js"
+      ],
       "run_at": "document_idle",
       "all_frames": false
     }

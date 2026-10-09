@@ -38,7 +38,7 @@ import {
 import { hasPrivacyConsent } from './lib/privacy.js';
 import { addRecordWithSource, resumePendingBackups } from './lib/db.js';
 import { promptFromImageGenerationMetadata, readImageGenerationMetadata } from './lib/image-metadata.js';
-import { interruptedSessionPatch, normalizedWindowId, recoverInterruptedGenerationJobs, scopedSessionKey } from './lib/task-state.js';
+import { interruptedSessionPatch, normalizedWindowId, recoverInterruptedGenerationJobs, scopedSessionKey, sourceKey } from './lib/task-state.js';
 import { resolveLanguage, t } from './lib/i18n.js';
 import { generatedImages } from './lib/generation-results.js';
 
@@ -841,7 +841,7 @@ async function doSurprise({ selection, sourceRequestId, sourceTs, ratio, windowI
 
 // ---------- 生成 ----------
 
-async function doGenerate({ prompt, ratio, selection, sourceRequestId, sourceTs, sourceDataUrl = '', windowId }) {
+async function doGenerate({ prompt, ratio, selection, sourceRequestId, sourceTs, sourceDataUrl = '', windowId }, control = null) {
   if (!await hasPrivacyConsent()) {
     return { ok: false, error: '请先阅读并同意隐私说明' };
   }
@@ -864,6 +864,8 @@ async function doGenerate({ prompt, ratio, selection, sourceRequestId, sourceTs,
   const size = s.sizeMap?.[ratio] || s.sizeMap?.['1:1'] || '1024x1024';
   const quality = s.imageQuality || 'low';
   const resolution = s.imageResolution || '1k';
+  // 停止可能发生在隐私或设置读取期间；在实际提交平台请求前最后确认。
+  control?.checkpoint();
   let r;
   if (cfg.apiType === 'openrouter-image-v1') {
     r = await generateOpenRouterImage({
@@ -1426,6 +1428,37 @@ async function surpriseAndPersist(payload, update) {
   }
 }
 
+async function persistGenerationDraft(payload) {
+  const submittedAt = Number(payload.draftSubmittedAt) || Date.now();
+  const surprise = payload.albumMeta?.kind === 'surprise';
+  const expectedKey = surprise ? payload.sourceKey : sourceKey(payload.sourceSnapshot);
+  if (!expectedKey) return;
+  const kind = surprise ? 'surpriseTask' : 'panelTask';
+  const taskKey = scopedSessionKey(kind, payload.windowId);
+  const currentSourceKey = scopedSessionKey(surprise ? 'surpriseTask' : 'pendingSource', payload.windowId);
+  // 来源与草稿在一次读取中取得，避免两次等待之间的新编辑被旧快照覆盖。
+  const values = await chrome.storage.session.get([...new Set([taskKey, currentSourceKey])]);
+  const existing = values[taskKey];
+  const currentSource = values[currentSourceKey];
+  if (sourceKey(currentSource) !== expectedKey || (surprise && !currentSource?.active)) return;
+  const sameTask = sourceKey(existing) === expectedKey ? existing : {};
+  // 用户提交后继续编辑的文案更晚，应保留该草稿，而非回写较早的提交内容。
+  if (Number(sameTask.updatedAt || 0) > submittedAt) return;
+  await setWindowSession(kind, payload.windowId, {
+    ...sameTask,
+    sourceRequestId: surprise ? currentSource.sourceRequestId : payload.sourceSnapshot?.requestId || '',
+    sourceTs: surprise ? currentSource.sourceTs : payload.sourceSnapshot?.ts,
+    prompt: payload.prompt,
+    sourcePrompt: surprise ? payload.prompt : payload.sourcePrompt || payload.prompt,
+    ...(surprise ? {} : {
+      promptZh: payload.promptZh || '',
+      explanationLanguage: payload.explanationLanguage || ''
+    }),
+    ratio: payload.ratio,
+    updatedAt: submittedAt
+  });
+}
+
 async function generateAndSave(payload, update, control) {
   const source = payload.sourceSnapshot ? { ...payload.sourceSnapshot } : null;
   control.checkpoint();
@@ -1437,6 +1470,8 @@ async function generateAndSave(payload, update, control) {
     sourceKey: source?.requestId || source?.ts || payload.sourceKey || null,
     label: 'generate'
   });
+  // 文案随生成请求交给后台保存，侧栏关闭不会取消提交前的持久化。
+  await persistGenerationDraft(payload);
   const resp = await doGenerate({
     ...payload,
     sourceDataUrl: payload.sourceDataUrl || '',
@@ -1537,17 +1572,20 @@ async function generateGroupAndSave(payload, update, control) {
     const variationPrompt = requestIndex === 0
       ? payload.prompt
       : `${payload.prompt}\n\n这是同一主题组图的第 ${number} 张。保持主体类型、核心外观、服装、环境、光线、色彩和整体画风尽量一致，仅对动作、表情、机位或构图做自然的小幅变化；不得增加或删除主要角色。`;
+    // 等待进度写入时也可能收到停止请求，提交下一次调用前再确认。
+    if (control.isCancelled()) break;
     const resp = await doGenerate({
       prompt: variationPrompt,
       ratio: payload.ratio,
       selection: payload.initialSelection,
       sourceDataUrl: '',
       windowId: payload.windowId
-    });
+    }, control);
     if (!resp?.ok) throw new Error(`第 ${number} 张失败：${resp?.error || '未知错误'}`);
     const outputs = generatedImages(resp, count - recordIds.length);
     for (const output of outputs) {
-      if (control.isCancelled()) break;
+      // 停止阻止下一次模型请求；当前已提交请求返回的图片仍须保存，
+      // 避免丢失已经完成（且可能计费）的结果。
       const groupIndex = recordIds.length + 1;
       const albumRecordId = await saveGeneratedRecord(output, {
         prompt: payload.prompt,

@@ -201,9 +201,18 @@ let taskWriteChain = Promise.resolve();
 let settingsWriteChain = Promise.resolve();
 let taskPersistTimer = 0;
 let privacyConsentGranted = false;
+let actionDockSizeFrame = 0;
 const actionDockSizeObserver = new ResizeObserver(() => {
-  const height = $('actionDock').offsetHeight;
-  if (height > 0) document.body.style.setProperty('--action-dock-height', `${height}px`);
+  // 底栏高度会影响主区留白。移出观察器分发阶段，避免回写布局再次触发本轮观察。
+  if (actionDockSizeFrame) return;
+  actionDockSizeFrame = requestAnimationFrame(() => {
+    actionDockSizeFrame = 0;
+    const height = $('actionDock').offsetHeight;
+    const value = `${height}px`;
+    if (height > 0 && document.body.style.getPropertyValue('--action-dock-height') !== value) {
+      document.body.style.setProperty('--action-dock-height', value);
+    }
+  });
 });
 actionDockSizeObserver.observe($('actionDock'));
 let characters = [];
@@ -1450,6 +1459,8 @@ async function generate() {
   const sourcePromptSnapshot = reversedPrompt || prompt;
   const promptZhSnapshot = reversedPromptZh;
   const explanationLanguageSnapshot = reversedPromptLanguage;
+  const ratioSnapshot = els.selRatio.value;
+  const surpriseProfileSnapshot = currentSurpriseProfile;
   const imageSelection = selectedModel(els.selImageModel);
   const imageChoice = listModelChoices(settings, 'image').find((item) =>
     item.platformId === imageSelection.platformId && item.model === imageSelection.model);
@@ -1461,14 +1472,10 @@ async function generate() {
     showToast(ui('当前模型仅支持图片编辑，请切换到支持文生图的模型'));
     return;
   }
-  // 惊喜提示词已由输入防抖和后台任务保存，点击生图时不再重复读写整份
-  // surpriseTask，直接按普通反推结果的生图路径启动后台请求。
-  if (surpriseSnapshot) {
-    clearTimeout(taskPersistTimer);
-    taskPersistTimer = 0;
-  } else {
-    void persistTask();
-  }
+  // 立即把提交文案交给后台保存并生成，避免关闭侧栏中断保存等待。
+  clearTimeout(taskPersistTimer);
+  taskPersistTimer = 0;
+  const draftSubmittedAt = Date.now();
   const clientJobId = crypto.randomUUID();
   beginGenerationProgress(clientJobId, {
     sourceKey: sourceKey(sourceSnapshot) || (surpriseSnapshot ? sourceKey(source) : ''),
@@ -1479,8 +1486,9 @@ async function generate() {
   try {
     const resp = await send({ type: 'ir.job.generate', payload: {
       clientJobId,
+      draftSubmittedAt,
       prompt,
-      ratio: els.selRatio.value,
+      ratio: ratioSnapshot,
       selection: imageSelection,
       ...(surpriseSnapshot
         ? {
@@ -1488,9 +1496,9 @@ async function generate() {
             // 只发送一次长提示词，避免 sendMessage 在 UI 线程重复克隆。
             albumMeta: {
               kind: 'surprise',
-              surpriseProfile: currentSurpriseProfile
+              surpriseProfile: surpriseProfileSnapshot
             },
-            sourceKey: sourceKey(source)
+            sourceKey: sourceKey(sourceSnapshot)
           }
         : {
             sourceSnapshot,
