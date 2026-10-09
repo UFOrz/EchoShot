@@ -219,10 +219,38 @@
     if (el.matches?.(PAGE_OBSTRUCTION_SELECTOR)) return true;
     if (!(el instanceof Element) || el.contains(img) || img.contains(el)) return false;
     if (!isRenderedElement(el)) return false;
+    if (el === imagePaintLayer(img)) return false;
+    if (isProductZoomLens(el, img)) return false;
     if (isSiteImageHoverLayer(el, img)) return false;
     // 图片卡片的透明按钮容器并未遮住图片；实际按钮仍由控件检测避让。
     // 独立遮罩、跨卡片容器和不透明覆盖层继续阻挡图片选择。
     return !isImageActionLayer(el, img);
+  }
+
+  function isProductZoomLens(el, img) {
+    // 商品主图的放大镜选区跟随鼠标，并不阻止选取其下方的原图。
+    // 仅接受已确认的同容器空选区；实际控件和独立遮罩仍要避让。
+    if (!/^(?:item\.taobao\.com|detail\.tmall\.com)$/i.test(location.hostname) ||
+        img.id !== 'mainPicImageEl' || el.tagName !== 'DIV' || el.id !== 'lensDiv' ||
+        !el.classList.contains('js-image-zoom__zoomed-area') ||
+        el.parentElement !== img.parentElement || el.childElementCount ||
+        el.matches(PAGE_CONTROL_SELECTOR)) return false;
+    const preview = [...img.parentElement.children].find((node) =>
+      node.classList.contains('js-image-zoom__zoomed-image'));
+    if (!preview || getComputedStyle(preview).backgroundImage === 'none') return false;
+    const style = getComputedStyle(el);
+    const opacity = Number(style.opacity);
+    if (style.position !== 'absolute' || opacity <= 0 || opacity >= 1 ||
+        style.backgroundImage !== 'none' ||
+        (style.backdropFilter && style.backdropFilter !== 'none')) return false;
+    const rect = el.getBoundingClientRect();
+    const imageRect = img.getBoundingClientRect();
+    const containerRect = img.parentElement.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0 && rect.width <= imageRect.width &&
+      rect.height <= imageRect.height && rect.left >= containerRect.left - 1 &&
+      rect.top >= containerRect.top - 1 && rect.right <= containerRect.right + 1 &&
+      rect.bottom <= containerRect.bottom + 1 && rect.left < imageRect.right &&
+      rect.right > imageRect.left && rect.top < imageRect.bottom && rect.bottom > imageRect.top;
   }
 
   function isSiteImageHoverLayer(el, img) {
@@ -261,7 +289,7 @@
     for (const other of card.querySelectorAll('img')) {
       if (other === img) continue;
       const rect = other.getBoundingClientRect();
-      if (rect.width >= MIN_SIZE && rect.height >= MIN_SIZE && isRenderedElement(other)) return false;
+      if (rect.width >= MIN_SIZE && rect.height >= MIN_SIZE && isRenderedImage(other)) return false;
     }
     // pointer-events:none 的绘制层不会出现在命中栈中，也要检查整个装饰层。
     for (const node of [overlay, ...overlay.querySelectorAll('*')]) {
@@ -314,7 +342,7 @@
     for (const other of card.querySelectorAll('img')) {
       if (other === img) continue;
       const rect = other.getBoundingClientRect();
-      if (rect.width >= MIN_SIZE && rect.height >= MIN_SIZE && isRenderedElement(other)) return false;
+      if (rect.width >= MIN_SIZE && rect.height >= MIN_SIZE && isRenderedImage(other)) return false;
     }
     return [...el.querySelectorAll(`${PAGE_CONTROL_SELECTOR},[aria-label],[title]`)].some((control) => {
       const rect = control.getBoundingClientRect();
@@ -379,6 +407,31 @@
     return true;
   }
 
+  // X 等页面把照片绘制在相邻背景层，透明 IMG 仍提供图片地址和命中区域。
+  // 只认同一父容器内地址、边界完全对应的可见图层，隐藏图片仍不能触发按钮。
+  function imagePaintLayer(img) {
+    const style = getComputedStyle(img);
+    if (style.opacity !== '0' || style.display === 'none' ||
+        style.visibility === 'hidden' || style.visibility === 'collapse') return null;
+    const parent = img.parentElement;
+    const src = img.currentSrc || img.src;
+    if (!src || !parent || !isRenderedElement(parent)) return null;
+    const imageRect = img.getBoundingClientRect();
+    for (const layer of parent.children) {
+      if (layer === img || !isRenderedElement(layer)) continue;
+      const background = getComputedStyle(layer).backgroundImage.match(/^url\((["']?)(.*?)\1\)$/);
+      if (!background || background[2] !== src) continue;
+      const layerRect = layer.getBoundingClientRect();
+      if (['left', 'top', 'right', 'bottom'].every((side) =>
+          Math.abs(layerRect[side] - imageRect[side]) <= 1)) return layer;
+    }
+    return null;
+  }
+
+  function isRenderedImage(img) {
+    return isRenderedElement(img) || !!imagePaintLayer(img);
+  }
+
   function imageActionContainer(img) {
     const known = img.closest('[data-test-id="pinWrapper"],article[class*="MediaCard_card__"]');
     if (known) return known;
@@ -416,7 +469,7 @@
         const src = el.currentSrc || el.src;
         if (!src) continue;
         const r = el.getBoundingClientRect();
-        if (r.width >= MIN_SIZE && r.height >= MIN_SIZE && isRenderedElement(el)) {
+        if (r.width >= MIN_SIZE && r.height >= MIN_SIZE && isRenderedImage(el)) {
           return foreground.some((item) => isImageObstruction(item, el) || isPageControl(item, el)) ? null : el;
         }
       }
@@ -427,7 +480,7 @@
 
   function positionFab(img) {
     const r = clippedRect(img);
-    if (!isRenderedElement(img) || r.width < FAB_SIZE + FAB_INSET * 2 || r.height < FAB_SIZE + FAB_INSET * 2) {
+    if (!isRenderedImage(img) || r.width < FAB_SIZE + FAB_INSET * 2 || r.height < FAB_SIZE + FAB_INSET * 2) {
       return false;
     }
     const minX = r.left + FAB_INSET;

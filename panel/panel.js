@@ -1,7 +1,7 @@
 // 侧边栏面板：来源图片 → 反推提示词 → 生成同款图片 → 自动存入相册
 
 import { buildModelAliasIndex, imageEditReferenceLimit, listModelChoices, loadSettings, recordModelDisplayName, requiresSourceImage, saveSettings, supportsImageEdit } from '../lib/settings.js';
-import { getById, addCharacter, getCharacters, getCharacterById, removeCharacters } from '../lib/db.js';
+import { getById, getSourceBlob, addCharacter, getCharacters, getCharacterById, removeCharacters } from '../lib/db.js';
 import { detectImageFileType } from '../lib/image-file.js';
 import {
   buildEchoShotMetadata,
@@ -603,6 +603,10 @@ async function handleDroppedImage(file) {
     mime: normalized.mime
   };
 
+  // 选图明确结束手写/随机创作；返回首页后也不能保留旧的活动草稿。
+  await removeWindowSession('surpriseTask');
+  if (operation !== droppedImageSeq) return;
+
   if (prompt) {
     const ratio = String(embeddedMetadata?.ratio || '');
     const task = {
@@ -1098,7 +1102,7 @@ function applySource(s) {
   const becameReady = s.status === 'ready' && (isNew || source?.status !== 'ready');
   if (isNew) {
     sourcePreviewOverride = null;
-    if (surpriseMode) void removeWindowSession('surpriseTask');
+    void removeWindowSession('surpriseTask');
     reverseSeq += 1; // 让旧图片仍在等待的反推响应失效
     reversing = false;
     resetTaskUI();
@@ -1443,7 +1447,7 @@ function removeLocalGenerationJob(clientJobId) {
   setGenerationJobsState(generationJobsState.filter((item) => item.id !== clientJobId));
 }
 
-async function generate() {
+async function generate(original = null) {
   if (!privacyConsentGranted) { renderPrivacyRequired(); return; }
   const prompt = els.taPrompt.value.trim();
   if (!prompt) { showToast(ui('请先反推或输入提示词')); return; }
@@ -1454,13 +1458,14 @@ async function generate() {
   if (generationSubmitLocked) return;
   generationSubmitLocked = true;
   setTimeout(() => { generationSubmitLocked = false; }, 500);
-  const surpriseSnapshot = surpriseMode;
-  const sourceSnapshot = source ? { ...source } : null;
+  const surpriseSnapshot = original ? original.kind === 'surprise' : surpriseMode;
+  const sourceSnapshot = original ? original.sourceSnapshot : source ? { ...source } : null;
+  const sourceKeySnapshot = original ? original.sourceKey : sourceKey(sourceSnapshot);
   const sourcePromptSnapshot = reversedPrompt || prompt;
   const promptZhSnapshot = reversedPromptZh;
   const explanationLanguageSnapshot = reversedPromptLanguage;
   const ratioSnapshot = els.selRatio.value;
-  const surpriseProfileSnapshot = currentSurpriseProfile;
+  const surpriseProfileSnapshot = original ? original.surpriseProfile || '' : currentSurpriseProfile;
   const imageSelection = selectedModel(els.selImageModel);
   const imageChoice = listModelChoices(settings, 'image').find((item) =>
     item.platformId === imageSelection.platformId && item.model === imageSelection.model);
@@ -1478,7 +1483,7 @@ async function generate() {
   const draftSubmittedAt = Date.now();
   const clientJobId = crypto.randomUUID();
   beginGenerationProgress(clientJobId, {
-    sourceKey: sourceKey(sourceSnapshot) || (surpriseSnapshot ? sourceKey(source) : ''),
+    sourceKey: sourceKeySnapshot || (surpriseSnapshot && !original ? sourceKey(source) : ''),
     label: surpriseSnapshot ? 'surprise-image' : 'generate'
   });
   showToast(ui('已开始生成，可继续查看已有图片'));
@@ -1490,6 +1495,7 @@ async function generate() {
       prompt,
       ratio: ratioSnapshot,
       selection: imageSelection,
+      sourceKey: sourceKeySnapshot,
       ...(surpriseSnapshot
         ? {
             // 惊喜模式没有来源图；sourcePrompt 与 prompt 完全相同。
@@ -1497,8 +1503,7 @@ async function generate() {
             albumMeta: {
               kind: 'surprise',
               surpriseProfile: surpriseProfileSnapshot
-            },
-            sourceKey: sourceKey(sourceSnapshot)
+            }
           }
         : {
             sourceSnapshot,
@@ -1824,7 +1829,11 @@ function appendResultCard(rec, { reveal = false, persist = true } = {}) {
   regenerate.className = 'btn';
   regenerate.type = 'button';
   regenerate.dataset.action = 'regenerate';
-  regenerate.addEventListener('click', () => void regenerateRecord(rec));
+  regenerate.addEventListener('click', () => {
+    void regenerateRecord(rec).catch((error) => showToast(ui('生成失败：{error}', {
+      error: error?.message || String(error)
+    })));
+  });
   const album = document.createElement('button');
   album.className = 'btn ghost';
   album.type = 'button';
@@ -2280,6 +2289,18 @@ async function regenerateRecord(record) {
   const prompt = String(record.prompt || record.requestPrompt || '').trim();
   if (!prompt) return showToast(ui('缺少原作品提示词'));
 
+  // 重新生成沿用作品保存的原图；没有原图的作品也不能借用当前选中的图片。
+  const sourceBlob = await getSourceBlob(record);
+  const originalSource = sourceBlob ? {
+    requestId: record.sourceAssetId || `record:${record.id}`,
+    sourceAssetId: record.sourceAssetId || `record:${record.id}`,
+    status: 'ready',
+    needsReverse: false,
+    dataUrl: await blobToDataUrl(sourceBlob),
+    src: record.srcUrl || '',
+    pageUrl: record.pageUrl || ''
+  } : null;
+
   const choices = listModelChoices(settings, 'image');
   const originalChoice = choices.find((choice) =>
     choice.model === record.model && (
@@ -2300,7 +2321,12 @@ async function regenerateRecord(record) {
     els.selRatio.value = record.ratio;
   }
   updateHints();
-  await generate();
+  await generate({
+    sourceSnapshot: originalSource,
+    sourceKey: sourceKey(originalSource) || `record:${record.id}`,
+    kind: record.kind,
+    surpriseProfile: record.surpriseProfile
+  });
 }
 
 // ---------- 事件绑定 ----------
@@ -2316,7 +2342,7 @@ els.btnCopyPrompt.addEventListener('click', async () => {
     showToast(ui('复制失败：{error}', { error: error?.message || error }));
   }
 });
-els.btnGenerate.addEventListener('click', generate);
+els.btnGenerate.addEventListener('click', () => void generate());
 els.btnCancelGroup.addEventListener('click', cancelGroupJob);
 $('btnCapture').addEventListener('click', capturePage);
 $('btnCapture2').addEventListener('click', capturePage);

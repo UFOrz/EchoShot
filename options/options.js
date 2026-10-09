@@ -81,6 +81,25 @@ function settingsSnapshot(settings) {
   return JSON.stringify(canonical(settings));
 }
 
+function mergeSettingsChanges(baseline, edited, latest) {
+  const merged = structuredClone(latest);
+  const changed = (key, before, after) =>
+    settingsSnapshot({ [key]: before }) !== settingsSnapshot({ [key]: after });
+  for (const [key, value] of Object.entries(edited)) {
+    // 默认模型按用途、尺寸映射按比例保存，保留侧边栏更新的其他选择。
+    if (key === 'defaults' || key === 'sizeMap') {
+      for (const [name, item] of Object.entries(value)) {
+        if (changed(name, baseline[key]?.[name], item)) {
+          merged[key] = { ...merged[key], [name]: structuredClone(item) };
+        }
+      }
+    } else if (changed(key, baseline[key], value)) {
+      merged[key] = structuredClone(value);
+    }
+  }
+  return merged;
+}
+
 function refreshSaveState() {
   if (!state || savedSnapshot === null) return;
   dirty = settingsSnapshot(collectSettings()) !== savedSnapshot;
@@ -662,22 +681,33 @@ function collectSettings() {
   };
 }
 
-function applySettingsToForm(settings) {
-  // 导入会替换平台对象，旧请求不能参与新配置的去重、保存等待或状态展示。
-  pendingModelFetches.clear();
-  pendingWorkflowAliasLookups.clear();
-  platformStatus.clear();
+function applySettingsToForm(settings, { resetRequests = true, savedSettings = null } = {}) {
+  if (resetRequests) {
+    // 导入会替换平台对象，旧请求不能参与新配置的去重、保存等待或状态展示。
+    pendingModelFetches.clear();
+    pendingWorkflowAliasLookups.clear();
+    platformStatus.clear();
+  } else {
+    // 普通保存保留未变的平台对象，让进行中的模型查询继续完成。
+    settings.platforms = settings.platforms.map((platform) => {
+      const existing = state.platforms.find((item) => item.id === platform.id);
+      return existing && settingsSnapshot(existing) === settingsSnapshot(platform) ? existing : platform;
+    });
+  }
+  const previousPlatformId = activePlatformId;
   state = settings;
   $('interfaceLanguage').value = state.language || 'auto';
   currentLanguage = resolveLanguage(state.language);
-  activePlatformId = state.defaults.vision?.platformId || state.platforms[0]?.id || '';
+  activePlatformId = !resetRequests && state.platforms.some((item) => item.id === previousPlatformId)
+    ? previousPlatformId
+    : state.defaults.vision?.platformId || state.platforms[0]?.id || '';
   for (const ratio of RATIOS) $(sizeInputIds[ratio]).value = state.sizeMap?.[ratio] || '';
   $('defaultRatio').value = state.defaultRatio || '1:1';
   $('imageQuality').value = state.imageQuality || 'low';
   $('imageResolution').value = state.imageResolution || '1k';
   renderPlatforms();
   localizeDocument(currentLanguage);
-  savedSnapshot = settingsSnapshot(collectSettings());
+  savedSnapshot = settingsSnapshot(savedSettings || collectSettings());
   refreshSaveState();
 }
 
@@ -749,11 +779,14 @@ $('btnSave').addEventListener('click', async () => {
   try {
     await Promise.allSettled([...pendingWorkflowAliasLookups.values()].map((lookup) => lookup.promise));
     const settings = structuredClone(collectSettings());
-    const snapshot = settingsSnapshot(settings);
-    await saveSettings(settings);
-    savedSnapshot = snapshot;
+    const merged = mergeSettingsChanges(JSON.parse(savedSnapshot), settings, await loadSettings());
+    await saveSettings(merged);
+    const saved = await loadSettings();
+    const savedForm = Object.fromEntries(Object.keys(settings).map((key) => [key, saved[key]]));
+    const current = mergeSettingsChanges(settings, collectSettings(), savedForm);
+    applySettingsToForm(current, { resetRequests: false, savedSettings: savedForm });
     clearTimeout(savedTagTimer);
-    $('savedTag').hidden = settingsSnapshot(collectSettings()) !== snapshot;
+    $('savedTag').hidden = dirty;
     savedTagTimer = setTimeout(() => ($('savedTag').hidden = true), 2000);
   } catch (error) {
     const invalidRatio = RATIOS.find((ratio) => String(error?.message || '').startsWith(`${ratio}：`));
