@@ -13,13 +13,19 @@
       <h1>EchoShot · 拍同款相册</h1>
       <span class="count" id="countTag"></span>
     </div>
-    <input id="searchInput" type="search" placeholder="搜索提示词 / 中文解读 / 模型…" />
+    <input id="searchInput" type="search" aria-label="搜索相册" placeholder="搜索提示词 / 中文解读 / 模型…" />
     <div class="actions">
-      <button id="btnSelectAll" class="btn">全选</button>
-      <button id="btnDownloadSel" class="btn" disabled>下载</button>
-      <button id="btnDeleteSel" class="btn danger" disabled>删除</button>
-      <button id="btnDownloadAll" class="btn" type="button" disabled>下载整个相册（共 0 张）</button>
+      <button id="btnSelectAll" class="btn" type="button" aria-pressed="false">选择本页</button>
+      <button id="btnDownloadAll" class="btn ghost secondary" type="button" disabled>下载整个相册（共 0 张）</button>
       <button id="btnOptions" class="btn ghost">设置</button>
+    </div>
+    <div id="selBar" class="sel-bar" hidden>
+      <span class="selection-count" aria-live="polite">已选 <b id="selCount">0</b> 张</span>
+      <div class="selection-actions">
+        <button id="btnDownloadSel" class="btn primary-soft" type="button" disabled>下载选中</button>
+        <button id="btnDeleteSel" class="btn danger" type="button" disabled>删除选中</button>
+        <button id="btnClearSelection" class="btn ghost" type="button">取消选择</button>
+      </div>
     </div>
   </header>
 
@@ -35,8 +41,6 @@
     </div>
     <button id="btnCancelDownload" class="btn danger" type="button">取消下载</button>
   </section>
-
-  <div id="selBar" class="sel-bar" hidden>已选 <b id="selCount">0</b> 张</div>
 
   <main id="grid" class="grid"></main>
 
@@ -55,7 +59,7 @@
   </div>
 
   <!-- 大图灯箱 -->
-  <div id="lightbox" class="lightbox" hidden>
+  <div id="lightbox" class="lightbox" role="dialog" aria-modal="true" aria-label="图片信息" hidden>
     <div class="lb-backdrop" id="lbBackdrop"></div>
     <div class="lb-shell">
       <button class="lb-nav prev" id="lbPrev" type="button" aria-label="上一张" title="上一张（←）">‹</button>
@@ -70,18 +74,37 @@
             <div class="lb-compare-divider" id="lbCompareDivider" hidden><span></span></div>
             <span class="lb-compare-label result" id="lbResultLabel" hidden>同款图片</span>
           </div>
+          <div class="lb-image-tools">
+            <button id="lbCompareToggle" class="btn lb-compare-toggle icon-action has-tooltip" type="button" aria-pressed="false" aria-label="准备对比…" data-tooltip="准备对比…" disabled>
+              <svg class="action-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <rect x="3" y="4" width="18" height="16" rx="2"></rect>
+                <path d="M12 4v16M5.5 16l3.2-3.2 3.3 3.3 2.2-2.2 4.3 4.1"></path>
+              </svg>
+              <span id="lbCompareLabel">准备对比…</span>
+            </button>
+          </div>
         </div>
         <div class="lb-info">
+          <div class="lb-toolbar">
+            <strong>继续创作</strong>
+            <button class="lb-close" id="lbClose" title="关闭" aria-label="关闭大图">×</button>
+          </div>
+          <div class="lb-create-actions">
+            <button id="lbRegenerate" class="btn primary-soft" type="button">✨ 再拍一张</button>
+            <button id="lbReplace" class="btn primary-soft btn-icon-label" type="button">
+              <svg class="action-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <circle cx="7.5" cy="7" r="3"></circle>
+                <path d="M2.8 18c.6-3.9 2.2-6 4.7-6s4.1 2.1 4.7 6"></path>
+                <path d="M15 7h6m-2.2-2.2L21 7l-2.2 2.2M21 15h-6m2.2-2.2L15 15l2.2 2.2"></path>
+              </svg>
+              <span>替换角色</span>
+            </button>
+            <div class="group-control"><select id="lbGroupCount" aria-label="组图数量"><option value="2">2 张</option><option value="4" selected>4 张</option><option value="6">6 张</option><option value="8">8 张</option></select><button id="lbGenerateGroup" class="btn primary-soft" type="button">生成组图</button></div>
+          </div>
           <div class="lb-section">
             <div class="lb-label row">
               <span>提示词</span>
               <div class="lb-label-actions">
-                <button id="lbCompareToggle" class="btn mini ghost lb-compare-toggle icon-action has-tooltip" type="button" aria-pressed="false" aria-label="准备对比…" data-tooltip="准备对比…" disabled>
-                  <svg class="action-icon" viewBox="0 0 24 24" aria-hidden="true">
-                    <rect x="3" y="4" width="18" height="16" rx="2"></rect>
-                    <path d="M12 4v16M5.5 16l3.2-3.2 3.3 3.3 2.2-2.2 4.3 4.1"></path>
-                  </svg>
-                </button>
                 <button id="lbAddCharacter" class="btn mini ghost icon-action has-tooltip" type="button" aria-label="添加到角色库" data-tooltip="添加到角色库" data-state="default">
                   <svg class="action-icon state-icon state-default" viewBox="0 0 24 24" aria-hidden="true">
                     <circle cx="8" cy="7" r="3"></circle>
@@ -101,7 +124,6 @@
                     <path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"></path>
                   </svg>
                 </button>
-                <button class="lb-close" id="lbClose" title="关闭" aria-label="关闭大图">×</button>
               </div>
             </div>
             <div class="lb-prompt" id="lbPrompt"></div>
@@ -110,7 +132,9 @@
               <div class="lb-prompt zh" id="lbPromptZh"></div>
             </div>
           </div>
-          <dl class="lb-meta">
+          <details id="lbMetaDetails" class="lb-meta-details">
+            <summary>图片信息</summary>
+            <dl class="lb-meta">
             <div><dt>生成平台</dt><dd id="lbProvider"></dd></div>
             <div><dt>生成模型</dt><dd id="lbModel"></dd></div>
             <div><dt>尺寸</dt><dd id="lbSize"></dd></div>
@@ -118,19 +142,8 @@
             <div><dt>生成时间</dt><dd id="lbTime"></dd></div>
             <div id="lbSrcRow" hidden><dt>来源图片</dt><dd><a id="lbSrc" target="_blank" rel="noreferrer">查看原图</a></dd></div>
             <div id="lbPageRow" hidden><dt>来源页面</dt><dd><a id="lbPage" target="_blank" rel="noreferrer">访问页面</a></dd></div>
-          </dl>
-          <div class="lb-create-actions">
-            <button id="lbRegenerate" class="btn primary-soft" type="button">✨ 再拍一张</button>
-            <button id="lbReplace" class="btn primary-soft btn-icon-label" type="button">
-              <svg class="action-icon" viewBox="0 0 24 24" aria-hidden="true">
-                <circle cx="7.5" cy="7" r="3"></circle>
-                <path d="M2.8 18c.6-3.9 2.2-6 4.7-6s4.1 2.1 4.7 6"></path>
-                <path d="M15 7h6m-2.2-2.2L21 7l-2.2 2.2M21 15h-6m2.2-2.2L15 15l2.2 2.2"></path>
-              </svg>
-              <span>替换角色</span>
-            </button>
-            <div class="group-control"><select id="lbGroupCount" aria-label="组图数量"><option value="2">2 张</option><option value="4" selected>4 张</option><option value="6">6 张</option><option value="8">8 张</option></select><button id="lbGenerateGroup" class="btn primary-soft" type="button">生成组图</button></div>
-          </div>
+            </dl>
+          </details>
           <div class="lb-actions">
             <button id="lbDownload" class="btn">下载</button>
             <button id="lbDelete" class="btn danger">删除</button>

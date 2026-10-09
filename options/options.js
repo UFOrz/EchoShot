@@ -29,6 +29,10 @@ let state = null;
 let toastTimer = 0;
 let activePlatformId = '';
 let currentLanguage = 'zh';
+let savedSnapshot = null;
+let saving = false;
+let dirty = false;
+let savedTagTimer = 0;
 const platformStatus = new Map();
 const pendingWorkflowAliasLookups = new Map();
 const ui = (key, vars = {}) => t(key, vars, currentLanguage);
@@ -53,6 +57,65 @@ function showToast(text) {
   $('toast').hidden = false;
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => ($('toast').hidden = true), 2400);
+}
+
+function setLocalizedText(element, key, vars = {}) {
+  // 新建文本节点，避免 localizeDocument 缓存的旧动态文案覆盖当前状态。
+  const text = ui(key, vars);
+  if (element.textContent !== text) element.replaceChildren(document.createTextNode(text));
+}
+
+function settingsSnapshot(settings) {
+  const unorderedLists = new Set(['models', 'visionModels', 'imageModels', 'imageEditModels']);
+  const canonical = (value, key = '') => {
+    if (Array.isArray(value)) {
+      const items = value.map((item) => canonical(item));
+      return unorderedLists.has(key) ? items.sort() : items;
+    }
+    if (value && typeof value === 'object') {
+      return Object.fromEntries(Object.keys(value).sort().map((name) => [name, canonical(value[name], name)]));
+    }
+    return value;
+  };
+  return JSON.stringify(canonical(settings));
+}
+
+function refreshSaveState() {
+  if (!state || savedSnapshot === null) return;
+  dirty = settingsSnapshot(collectSettings()) !== savedSnapshot;
+  $('btnSave').disabled = saving || !dirty;
+  $('btnSave').textContent = ui(saving ? '正在保存…' : '保存设置');
+  $('saveState').dataset.state = saving ? 'saving' : dirty ? 'dirty' : 'saved';
+  setLocalizedText($('saveState'), saving ? '正在保存设置…' : dirty ? '有未保存的修改' : '所有修改已保存');
+  setLocalizedText($('saveHint'), dirty ? '保存后，新任务会使用这些设置。' : '回到网页，悬停图片并点击魔法按钮即可开始。');
+  if (dirty) $('savedTag').hidden = true;
+  refreshSetupProgress();
+}
+
+function refreshSetupProgress() {
+  if (!state) return;
+  const choicePlatform = (type) => state.platforms.find((item) => item.id === state.defaults[type]?.platformId);
+  const hasChoices = ['vision', 'image'].every((type) => {
+    const platform = choicePlatform(type);
+    const models = type === 'vision' ? platform?.visionModels : platform?.imageModels;
+    return models?.includes(state.defaults[type]?.model);
+  });
+  const configuredChoice = (type) => {
+    const choice = state.defaults[type];
+    const platform = choicePlatform(type);
+    const models = type === 'vision' ? platform?.visionModels : platform?.imageModels;
+    const local = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(?=[:/]|$)/i.test(platform?.baseUrl || '');
+    return Boolean(platform?.baseUrl.trim() && (platform?.apiKey.trim() || local) && models?.includes(choice?.model));
+  };
+  const ready = configuredChoice('vision') && configuredChoice('image');
+  setLocalizedText($('setupProgress'), !hasChoices ? '请先启用反推与生图模型。' : ready ? '基础配置已填写，保存后即可尝试。' : '请填写默认模型所用平台的密钥。');
+  $('setupProgress').dataset.ready = String(ready);
+}
+
+function updateModelIdentity(row, platform, model) {
+  const alias = String(platform.modelAliases?.[model] || '').trim();
+  row.querySelector('.model-name').textContent = alias || model;
+  row.querySelector('.model-id').hidden = !alias;
 }
 
 function newPlatform() {
@@ -92,7 +155,7 @@ function modelRows(platform) {
     ? platform.models
     : platform.models.filter((model) => platform.visionModels.includes(model) || platform.imageModels.includes(model));
   if (!visibleModels.length) return `<div class="model-empty">${esc(ui('未启用的模型已隐藏，可打开上方开关查看。'))}</div>`;
-  return visibleModels.map((model) => {
+  return visibleModels.map((model, index) => {
     const enabled = platform.visionModels.includes(model) || platform.imageModels.includes(model);
     const alias = String(platform.modelAliases?.[model] || '').trim();
     const kindDefinitions = {
@@ -110,16 +173,18 @@ function modelRows(platform) {
       : '';
     return `
     <div class="model-row${enabled ? '' : ' disabled-model'}" data-model="${esc(model)}">
-      <span class="model-identity">${kindBadges}<span class="model-name" title="${esc(model)}">${esc(model)}</span></span>
-      <span class="model-alias-wrap">
+      <span class="model-identity">${kindBadges}<span class="model-name-stack"><span class="model-name" title="${esc(model)}">${esc(alias || model)}</span><code class="model-id" ${alias ? '' : 'hidden'} title="${esc(model)}">${esc(model)}</code></span></span>
+      <button class="model-edit" type="button" aria-expanded="false" aria-controls="modelAlias-${esc(platform.id)}-${index}">${esc(ui('编辑名称'))}</button>
+      <label title="${esc(ui('看图生成提示词'))}"><input type="checkbox" data-capability="vision" ${platform.visionModels.includes(model) ? 'checked' : ''}/> ${esc(ui('反推'))}</label>
+      <label><input type="checkbox" data-capability="image" ${platform.imageModels.includes(model) ? 'checked' : ''}/> ${esc(ui('生图'))}</label>
+      <button class="model-remove" type="button" title="${esc(ui('移除模型'))}" aria-label="${esc(ui('移除模型'))}">×</button>
+      <span class="model-alias-wrap" id="modelAlias-${esc(platform.id)}-${index}" hidden>
+        <span class="alias-label">${esc(ui('显示名称'))}</span>
         <input class="model-alias" type="text" value="${esc(alias)}" placeholder="${esc(ui('模型别名（可选）'))}" aria-label="${esc(ui('为 {model} 设置别名', { model }))}" />
         ${isRunningHubPreset(platform.preset) && /^workflow\/\d+$/.test(model)
           ? `<button class="model-alias-fetch" type="button" ${alias ? 'hidden' : ''}>${esc(ui('获取名称'))}</button>`
           : ''}
       </span>
-      <label><input type="checkbox" data-capability="vision" ${platform.visionModels.includes(model) ? 'checked' : ''}/> ${esc(ui('反推'))}</label>
-      <label><input type="checkbox" data-capability="image" ${platform.imageModels.includes(model) ? 'checked' : ''}/> ${esc(ui('生图'))}</label>
-      <button class="model-remove" type="button" title="${esc(ui('移除模型'))}" aria-label="${esc(ui('移除模型'))}">×</button>
     </div>`;
   }).join('');
 }
@@ -180,7 +245,7 @@ function renderPlatforms() {
       : ui('前往 {platform} 获取 API Key', { platform: platformLabel });
     const getKeyLink = getKeyUrl
       ? `<span class="get-key-wrap">
-          <a class="get-key-link" data-affiliate="${preset.affiliateLink ? 'true' : 'false'}" href="${esc(getKeyUrl)}" target="_blank" rel="noopener noreferrer"${preset.affiliateLink ? ` aria-describedby="getKeyDisclosure" aria-label="${esc(getKeyLabel)}"` : ` title="${esc(getKeyLabel)}"`}>Get Key</a>
+          <a class="get-key-link" data-affiliate="${preset.affiliateLink ? 'true' : 'false'}" href="${esc(getKeyUrl)}" target="_blank" rel="noopener noreferrer"${preset.affiliateLink ? ` aria-describedby="getKeyDisclosure" aria-label="${esc(getKeyLabel)}"` : ` title="${esc(getKeyLabel)}"`}>${esc(ui('获取密钥'))}</a>
           ${preset.affiliateLink ? `<span class="get-key-disclosure" id="getKeyDisclosure" role="tooltip">${esc(affiliateDisclosure)}</span>` : ''}
         </span>`
       : '';
@@ -203,10 +268,13 @@ function renderPlatforms() {
       </div>
       <div class="platform-actions">
         <button class="btn fetch-models" type="button">${esc(ui('自动获取模型'))}</button>
-        <input class="manual-model" placeholder="${esc(ui('手动输入模型名称'))}" />
-        <button class="btn add-model" type="button">${esc(ui('添加'))}</button>
         <span class="platform-status">${esc(platformStatus.get(platform.id) || '')}</span>
       </div>
+      <details class="manual-model-details">
+        <summary>${esc(ui('手动添加模型（高级）'))}</summary>
+        <div class="manual-model-editor"><input class="manual-model" placeholder="${esc(ui('手动输入模型名称'))}" aria-label="${esc(ui('模型名称'))}" /><button class="btn add-model" type="button">${esc(ui('添加'))}</button></div>
+      </details>
+      <p class="model-use-hint">${esc(ui('勾选模型用途，再在下方选择默认模型。'))}</p>
       <div class="model-head">
         <span class="model-head-main">
           <span>${esc(ui('模型名称、别名与启用能力'))}</span>
@@ -224,6 +292,7 @@ function renderPlatforms() {
   }
   renderDefaults();
   localizeDocument(currentLanguage);
+  refreshSaveState();
 }
 
 function addModel(platform, model) {
@@ -284,9 +353,11 @@ function fetchManualWorkflowAlias(platform, model) {
       .find((item) => item.dataset.model === model);
     const input = row?.querySelector('.model-alias');
     if (input && !input.value.trim()) input.value = title;
+    if (row) updateModelIdentity(row, platform, model);
     const aliasButton = row?.querySelector('.model-alias-fetch');
     if (aliasButton) aliasButton.hidden = true;
     renderDefaults();
+    refreshSaveState();
     updatePlatformStatus(platform, usedPresetAlias ? '已填入内置工作流名称' : '已自动填入工作流名称');
   })().finally(() => {
     if (button?.isConnected) button.disabled = false;
@@ -299,6 +370,7 @@ function bindPlatformCard(card, platform) {
     input.addEventListener('input', () => {
       platform[input.dataset.field] = input.value;
       if (input.dataset.field === 'name') renderPlatformNav();
+      refreshSaveState();
     });
   });
   card.querySelector('[data-field="baseUrl"]').addEventListener('change', (e) => {
@@ -453,6 +525,7 @@ function bindPlatformCard(card, platform) {
     if (counts[0]) counts[0].textContent = ui('反 {count}', { count: platform.visionModels.length });
     if (counts[1]) counts[1].textContent = ui('图 {count}', { count: platform.imageModels.length });
     renderDefaults();
+    refreshSaveState();
   });
   card.querySelector('.model-list').addEventListener('input', (e) => {
     if (!e.target.classList.contains('model-alias')) return;
@@ -466,9 +539,19 @@ function bindPlatformCard(card, platform) {
     else delete platform.modelAliases[model];
     const aliasButton = e.target.closest('.model-row')?.querySelector('.model-alias-fetch');
     if (aliasButton) aliasButton.hidden = Boolean(alias);
+    updateModelIdentity(e.target.closest('.model-row'), platform, model);
     renderDefaults();
+    refreshSaveState();
   });
   card.querySelector('.model-list').addEventListener('click', (e) => {
+    const editButton = e.target.closest('.model-edit');
+    if (editButton) {
+      const editor = editButton.closest('.model-row').querySelector('.model-alias-wrap');
+      editor.hidden = !editor.hidden;
+      editButton.setAttribute('aria-expanded', String(!editor.hidden));
+      if (!editor.hidden) editor.querySelector('.model-alias').focus();
+      return;
+    }
     if (e.target.closest('.model-alias-fetch')) {
       const model = e.target.closest('.model-row')?.dataset.model;
       if (model) fetchManualWorkflowAlias(platform, model);
@@ -484,6 +567,11 @@ function bindPlatformCard(card, platform) {
     platform.imageModels = platform.imageModels.filter((item) => item !== model);
     platform.imageEditModels = (platform.imageEditModels || []).filter((item) => item !== model);
     renderPlatforms();
+  });
+  card.querySelector('.manual-model').addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter') return;
+    event.preventDefault();
+    card.querySelector('.add-model').click();
   });
   card.querySelector('.remove-platform').addEventListener('click', (e) => {
     const button = e.currentTarget;
@@ -538,13 +626,15 @@ function applySettingsToForm(settings) {
   state = settings;
   $('interfaceLanguage').value = state.language || 'auto';
   currentLanguage = resolveLanguage(state.language);
-  activePlatformId = state.platforms[0]?.id || '';
+  activePlatformId = state.defaults.vision?.platformId || state.platforms[0]?.id || '';
   for (const ratio of RATIOS) $(sizeInputIds[ratio]).value = state.sizeMap?.[ratio] || '';
   $('defaultRatio').value = state.defaultRatio || '1:1';
   $('imageQuality').value = state.imageQuality || 'low';
   $('imageResolution').value = state.imageResolution || '1k';
   renderPlatforms();
   localizeDocument(currentLanguage);
+  savedSnapshot = settingsSnapshot(collectSettings());
+  refreshSaveState();
 }
 
 function settingsExportName() {
@@ -585,13 +675,14 @@ function importedSettingsFrom(value) {
   return imported;
 }
 
-$('defaultVision').addEventListener('change', (e) => { state.defaults.vision = parseChoice(e.target.value); });
-$('defaultImage').addEventListener('change', (e) => { state.defaults.image = parseChoice(e.target.value); });
+$('defaultVision').addEventListener('change', (e) => { state.defaults.vision = parseChoice(e.target.value); refreshSaveState(); });
+$('defaultImage').addEventListener('change', (e) => { state.defaults.image = parseChoice(e.target.value); refreshSaveState(); });
 $('interfaceLanguage').addEventListener('change', (e) => {
   state.language = e.target.value;
   currentLanguage = resolveLanguage(state.language);
   renderPlatforms();
   localizeDocument(currentLanguage);
+  refreshSaveState();
 });
 $('btnAddPlatform').addEventListener('click', () => {
   const presetId = $('addPlatformPreset').value;
@@ -608,13 +699,28 @@ $('btnAddPlatform').addEventListener('click', () => {
   renderPlatforms();
 });
 $('btnSave').addEventListener('click', async () => {
+  if (saving) return;
+  saving = true;
+  refreshSaveState();
   try {
     await Promise.allSettled([...pendingWorkflowAliasLookups.values()].map((lookup) => lookup.promise));
-    await saveSettings(collectSettings());
-    $('savedTag').hidden = false;
-    setTimeout(() => ($('savedTag').hidden = true), 2000);
+    const settings = structuredClone(collectSettings());
+    const snapshot = settingsSnapshot(settings);
+    await saveSettings(settings);
+    savedSnapshot = snapshot;
+    clearTimeout(savedTagTimer);
+    $('savedTag').hidden = settingsSnapshot(collectSettings()) !== snapshot;
+    savedTagTimer = setTimeout(() => ($('savedTag').hidden = true), 2000);
   } catch (error) {
+    const invalidRatio = RATIOS.find((ratio) => String(error?.message || '').startsWith(`${ratio}：`));
+    if (invalidRatio) {
+      $('advancedSizes').open = true;
+      $(sizeInputIds[invalidRatio]).focus();
+    }
     showToast(error?.message || String(error));
+  } finally {
+    saving = false;
+    refreshSaveState();
   }
 });
 $('btnExportSettings').addEventListener('click', () => {
@@ -642,6 +748,27 @@ $('settingsImportFile').addEventListener('change', async (event) => {
   }
 });
 $('btnAlbum').addEventListener('click', () => chrome.tabs.create({ url: chrome.runtime.getURL('album/album.html') }));
+
+for (const id of [...Object.values(sizeInputIds), 'defaultRatio', 'imageQuality', 'imageResolution']) {
+  $(id).addEventListener('input', refreshSaveState);
+  $(id).addEventListener('change', refreshSaveState);
+}
+document.querySelectorAll('[data-settings-target]').forEach((button) => {
+  button.addEventListener('click', () => {
+    const targetId = button.dataset.settingsTarget;
+    const target = targetId === 'platformKey'
+      ? $('platformDetail').querySelector('[data-field="apiKey"]') || $('addPlatformPreset')
+      : $(targetId);
+    target?.scrollIntoView({ behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'center' });
+    if (targetId === 'btnSave' && target?.disabled) $('saveState').focus({ preventScroll: true });
+    else target?.focus({ preventScroll: true });
+  });
+});
+window.addEventListener('beforeunload', (event) => {
+  if (!dirty) return;
+  event.preventDefault();
+  event.returnValue = '';
+});
 
 (async function init() {
   const presetOrder = new Map(DEFAULT_PLATFORM_PRESET_IDS.map((id, index) => [id, index]));

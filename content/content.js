@@ -1,4 +1,4 @@
-// 内容脚本：检测鼠标悬停的图片，在右上角显示浮动按钮。
+// 内容脚本：检测鼠标悬停的图片，在不遮挡网页控件的位置显示浮动按钮。
 // 使用 Shadow DOM 隔离样式，避免被站点 CSS 干扰。
 
 (() => {
@@ -10,17 +10,25 @@
   try { previousRuntime?.cleanup?.(); } catch { /* 旧扩展上下文可能已失效 */ }
   document.getElementById('ir-fab-host')?.remove();
   document.getElementById('ir-region-capture-host')?.remove();
-  const contentRuntime = {};
+  const contentRuntime = { active: true };
   globalThis.__paiTongKuanContentReady = contentRuntime;
 
   const MIN_SIZE = 110; // 过小的图标/头像不处理
   const HOST_ID = 'ir-fab-host';
+  const FAB_SIZE = 30;
+  const FAB_INSET = 6;
+  const PAGE_CONTROL_SELECTOR = 'button,a[href],[role="button"],[role="link"],input,select,textarea,summary,[onclick],[tabindex]:not([tabindex="-1"])';
+  const PAGE_OBSTRUCTION_SELECTOR = 'iframe,object,embed';
 
   let host = null;
   let btn = null;
   let currentImg = null;
   let hideTimer = 0;
   let rafId = 0;
+  let lastPositionAt = 0;
+  let lastPositionRect = '';
+  let lastPositionAvailable = false;
+  let currentCorner = -1;
   let lastX = 0;
   let lastY = 0;
   let magicButtonVisible = true;
@@ -149,28 +157,98 @@
     (document.documentElement || document.body).appendChild(host);
   }
 
-  // 找到坐标下第一张足够大的 <img>（跳过本插件的按钮，兼容图片上方有遮挡层的情况）
+  function isPageControl(el, img) {
+    if (!(el instanceof Element) || el === host) return false;
+    const control = el.closest(PAGE_CONTROL_SELECTOR);
+    // 图片本身可能位于链接或按钮内，这不应阻止用户选取图片。
+    if (control && !control.contains(img)) return true;
+    for (let node = el; node && node !== document.documentElement; node = node.parentElement) {
+      if (node === control || node.contains(img)) break;
+      const rect = node.getBoundingClientRect();
+      if (rect.width > 0 && rect.width <= 72 && rect.height > 0 && rect.height <= 72 &&
+          (node.hasAttribute('aria-label') || node.hasAttribute('title') ||
+           /(?:close|dismiss|关闭|關閉)/i.test(String(node.className || '')) ||
+           getComputedStyle(node).cursor === 'pointer')) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function pageControlAt(x, y, img) {
+    for (const el of document.elementsFromPoint(x, y)) {
+      if (el === host) continue;
+      if (el.matches?.(PAGE_OBSTRUCTION_SELECTOR)) return true;
+      if (el === img) return false;
+      if (isPageControl(el, img)) return true;
+    }
+    return false;
+  }
+
+  // 找到坐标下第一张足够大的 <img>，但不穿过网页上的可交互控件。
   function findImgAt(x, y) {
     const els = document.elementsFromPoint(x, y);
+    const foreground = [];
     for (const el of els) {
       if (el === host) continue;
+      if (el.matches?.(PAGE_OBSTRUCTION_SELECTOR)) return null;
       if (el.tagName === 'IMG') {
         const src = el.currentSrc || el.src;
         if (!src) continue;
         const r = el.getBoundingClientRect();
-        if (r.width >= MIN_SIZE && r.height >= MIN_SIZE) return el;
+        if (r.width >= MIN_SIZE && r.height >= MIN_SIZE) {
+          return foreground.some((item) => isPageControl(item, el)) ? null : el;
+        }
       }
+      foreground.push(el);
     }
     return null;
   }
 
-  function positionFab(img) {
+  function positionFab(img, force = false) {
     const r = img.getBoundingClientRect();
-    const size = 30;
-    const left = Math.max(4, Math.min(r.right - size - 6, window.innerWidth - size - 4));
-    const top = Math.max(4, Math.min(r.top + 6, window.innerHeight - size - 4));
-    host.style.left = left + 'px';
-    host.style.top = top + 'px';
+    const rectKey = [r.left, r.top, r.right, r.bottom, window.innerWidth, window.innerHeight].join(',');
+    const now = performance.now();
+    if (!force && rectKey === lastPositionRect && now - lastPositionAt < 120) return lastPositionAvailable;
+    lastPositionAt = now;
+    lastPositionRect = rectKey;
+    const left = Math.max(0, r.left);
+    const top = Math.max(0, r.top);
+    const right = Math.min(window.innerWidth, r.right);
+    const bottom = Math.min(window.innerHeight, r.bottom);
+    if (right - left < FAB_SIZE + FAB_INSET * 2 || bottom - top < FAB_SIZE + FAB_INSET * 2) {
+      lastPositionAvailable = false;
+      return false;
+    }
+    const corners = [
+      [right - FAB_SIZE - FAB_INSET, top + FAB_INSET],
+      [left + FAB_INSET, top + FAB_INSET],
+      [right - FAB_SIZE - FAB_INSET, bottom - FAB_SIZE - FAB_INSET],
+      [left + FAB_INSET, bottom - FAB_SIZE - FAB_INSET]
+    ];
+    const cornerOrder = [0, 1, 2, 3];
+    if (currentCorner >= 0) cornerOrder.unshift(...cornerOrder.splice(currentCorner, 1));
+    const previousPointerEvents = btn.style.pointerEvents;
+    btn.style.pointerEvents = 'none';
+    try {
+      for (const corner of cornerOrder) {
+        const [x, y] = corners[corner];
+        const xs = [x - 3, x + FAB_SIZE / 2, x + FAB_SIZE + 3];
+        const ys = [y - 3, y + FAB_SIZE / 2, y + FAB_SIZE + 3];
+        if (xs.some((sampleX) => ys.some((sampleY) =>
+          pageControlAt(Math.max(0, Math.min(window.innerWidth - 1, sampleX)),
+            Math.max(0, Math.min(window.innerHeight - 1, sampleY)), img)))) continue;
+        host.style.left = x + 'px';
+        host.style.top = y + 'px';
+        currentCorner = corner;
+        lastPositionAvailable = true;
+        return true;
+      }
+    } finally {
+      btn.style.pointerEvents = previousPointerEvents;
+    }
+    lastPositionAvailable = false;
+    return false;
   }
 
   function show(img) {
@@ -179,16 +257,18 @@
     if (currentImg !== img) {
       currentImg = img;
       host.style.display = 'none'; // 避免闪动，先定位再显示
-      positionFab(img);
+      lastPositionAt = 0;
+      currentCorner = -1;
     }
-    positionFab(img);
-    host.style.display = 'block';
+    host.style.display = positionFab(img) ? 'block' : 'none';
     clearTimeout(hideTimer);
   }
 
   function hide() {
     clearTimeout(hideTimer);
     currentImg = null;
+    lastPositionAt = 0;
+    currentCorner = -1;
     if (host) host.style.display = 'none';
   }
 
@@ -198,6 +278,7 @@
   }
 
   function refreshMagicButton() {
+    if (!contentRuntime.active) return;
     if (!magicButtonVisible) {
       hide();
       return;
@@ -218,6 +299,7 @@
     rafId = 0;
     const img = findImgAt(lastX, lastY);
     if (img) show(img);
+    else if (currentImg && pageControlAt(lastX, lastY, currentImg)) hide();
     else if (currentImg) scheduleHide();
   }
 
@@ -473,7 +555,7 @@
 
   // 滚动 / 缩放时重新定位，图片滚出视口则隐藏
   function onScrollOrResize() {
-    if (!currentImg || !host || host.style.display === 'none') return;
+    if (!currentImg || !host) return;
     if (!document.contains(currentImg)) { hide(); return; }
     const r = currentImg.getBoundingClientRect();
     if (r.bottom < -20 || r.top > window.innerHeight + 20 ||
@@ -481,7 +563,7 @@
       hide();
       return;
     }
-    positionFab(currentImg);
+    host.style.display = positionFab(currentImg, true) ? 'block' : 'none';
   }
 
   document.addEventListener('mousemove', onMouseMove, { passive: true, capture: true });
@@ -489,6 +571,7 @@
   window.addEventListener('resize', onScrollOrResize, { passive: true });
 
   function cleanupRuntime() {
+    contentRuntime.active = false;
     clearTimeout(hideTimer);
     if (rafId) cancelAnimationFrame(rafId);
     document.removeEventListener('mousemove', onMouseMove, true);

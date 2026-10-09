@@ -15,17 +15,26 @@
     </div>
   </div>
   <header class="topbar">
-    <img class="logo" src="../icons/icon48.png" alt="" />
-    <h1>EchoShot · 拍同款</h1>
+    <h1><button id="btnHome" class="brand-home" type="button" aria-label="返回开始页"><img class="logo" src="../icons/icon48.png" alt="" /><span>EchoShot · 拍同款</span></button></h1>
     <div class="top-actions">
-      <button id="btnCapture" class="icon-btn has-tooltip tooltip-edge-left" type="button" aria-label="框选截图" data-tooltip="框选截图"><svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M8 21H5a2 2 0 0 1-2-2v-3M16 21h3a2 2 0 0 0 2-2v-3"/><rect x="7" y="8" width="10" height="8" rx="2"/><circle cx="12" cy="12" r="2.2"/></svg></button>
-      <button id="btnSurprise" class="icon-btn has-tooltip" type="button" aria-label="惊喜随机提示词" data-tooltip="惊喜随机提示词"><svg class="tool-icon magic-hat-icon" viewBox="0 0 24 24" aria-hidden="true"><path class="hat-rabbit" d="M9.4 13.7c-.9-2.3-1.2-4.9.1-5.4 1.1-.4 2 1.4 2.5 3 .5-1.6 1.4-3.4 2.5-3 1.3.5 1 3.1.1 5.4"/><path d="M5 15.4c0-1.3 3.1-2.3 7-2.3s7 1 7 2.3-3.1 2.3-7 2.3-7-1-7-2.3Zm1.8 1.3L8 21h8l1.2-4.3"/><path class="hat-stars" d="m6.1 4.4.42 1 .98.42-.98.42-.42 1-.42-1-.98-.42.98-.42.42-1Zm11.8.2.36.86.86.36-.86.36-.36.86-.36-.86-.86-.36.86-.36.36-.86ZM11.8 3v2.1M10.75 4.05h2.1"/></svg></button>
-      <button id="btnMagicToggle" class="icon-btn magic-toggle active has-tooltip" type="button" aria-label="隐藏魔法按钮" data-tooltip="隐藏魔法按钮" aria-pressed="true"><svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m15 4 5 5L8.5 20.5a2.1 2.1 0 0 1-3-3Z"/><path d="m13 6 5 5M5 3v3M3.5 4.5h3M19 15v4M17 17h4"/></svg></button>
-      <button id="btnCharacters" class="icon-btn has-tooltip" type="button" aria-label="角色与物品" data-tooltip="角色与物品"><svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="3"/><path d="M3.5 19a5.5 5.5 0 0 1 11 0M17 8h4M19 6v4"/></svg></button>
-      <button id="btnAlbum" class="icon-btn has-tooltip" type="button" aria-label="打开相册" data-tooltip="打开相册"><svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="15" rx="2"/><circle cx="8.5" cy="10" r="1.5"/><path d="m4 17 4.5-4 3.5 3 2.5-2 5.5 5"/></svg></button>
-      <button id="btnOptions" class="icon-btn has-tooltip" type="button" aria-label="平台与模型设置" data-tooltip="平台与模型设置"><svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.86 2.86-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6 1.7 1.7 0 0 0-.4 1v.1H9.5V21a1.7 1.7 0 0 0-1.1-1.6 1.7 1.7 0 0 0-1.88.34l-.06.06-2.86-2.86.06-.06A1.7 1.7 0 0 0 4 15a1.7 1.7 0 0 0-1.6-1H2.3V10h.1A1.7 1.7 0 0 0 4 9a1.7 1.7 0 0 0-.34-1.88l-.06-.06L6.46 4.2l.06.06A1.7 1.7 0 0 0 8.4 4a1.7 1.7 0 0 0 1.1-1.6v-.1h4.1v.1A1.7 1.7 0 0 0 15 4a1.7 1.7 0 0 0 1.88.26l.06-.06 2.86 2.86-.06.06A1.7 1.7 0 0 0 19.4 9a1.7 1.7 0 0 0 1.6 1h.1v4H21a1.7 1.7 0 0 0-1.6 1Z"/></svg></button>
+      <button id="btnAlbum" class="icon-btn labeled-tool has-tooltip" type="button" aria-label="打开相册" data-tooltip="打开相册"><svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="15" rx="2"/><circle cx="8.5" cy="10" r="1.5"/><path d="m4 17 4.5-4 3.5 3 2.5-2 5.5 5"/></svg><span class="tool-label">相册</span></button>
+      <button id="btnOptions" class="icon-btn labeled-tool has-tooltip" type="button" aria-label="平台与模型设置" data-tooltip="平台与模型设置"><svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.86 2.86-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6 1.7 1.7 0 0 0-.4 1v.1H9.5V21a1.7 1.7 0 0 0-1.1-1.6 1.7 1.7 0 0 0-1.88.34l-.06.06-2.86-2.86.06-.06A1.7 1.7 0 0 0 4 15a1.7 1.7 0 0 0-1.6-1H2.3V10h.1A1.7 1.7 0 0 0 4 9a1.7 1.7 0 0 0-.34-1.88l-.06-.06L6.46 4.2l.06.06A1.7 1.7 0 0 0 8.4 4a1.7 1.7 0 0 0 1.1-1.6v-.1h4.1v.1A1.7 1.7 0 0 0 15 4a1.7 1.7 0 0 0 1.88.26l.06-.06 2.86 2.86-.06.06A1.7 1.7 0 0 0 19.4 9a1.7 1.7 0 0 0 1.6 1h.1v4H21a1.7 1.7 0 0 0-1.6 1Z"/></svg><span class="tool-label">设置</span></button>
+      <details id="moreTools" class="more-tools">
+        <summary aria-label="更多工具">更多</summary>
+        <div class="tools-menu">
+          <button id="btnCapture" class="icon-btn menu-tool has-tooltip tooltip-edge-left" type="button" aria-label="框选截图" data-tooltip="框选截图"><svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M8 21H5a2 2 0 0 1-2-2v-3M16 21h3a2 2 0 0 0 2-2v-3"/><rect x="7" y="8" width="10" height="8" rx="2"/><circle cx="12" cy="12" r="2.2"/></svg><span class="tool-label">框选截图</span></button>
+          <button id="btnSurprise" class="icon-btn menu-tool has-tooltip" type="button" aria-label="惊喜随机提示词" data-tooltip="惊喜随机提示词"><svg class="tool-icon magic-hat-icon" viewBox="0 0 24 24" aria-hidden="true"><path class="hat-rabbit" d="M9.4 13.7c-.9-2.3-1.2-4.9.1-5.4 1.1-.4 2 1.4 2.5 3 .5-1.6 1.4-3.4 2.5-3 1.3.5 1 3.1.1 5.4"/><path d="M5 15.4c0-1.3 3.1-2.3 7-2.3s7 1 7 2.3-3.1 2.3-7 2.3-7-1-7-2.3Zm1.8 1.3L8 21h8l1.2-4.3"/><path class="hat-stars" d="m6.1 4.4.42 1 .98.42-.98.42-.42 1-.42-1-.98-.42.98-.42.42-1Zm11.8.2.36.86.86.36-.86.36-.36.86-.36-.86-.86-.36.86-.36.36-.86ZM11.8 3v2.1M10.75 4.05h2.1"/></svg><span class="tool-label">随机灵感</span></button>
+          <button id="btnCharacters" class="icon-btn menu-tool has-tooltip" type="button" aria-label="角色与物品" data-tooltip="角色与物品"><svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="3"/><path d="M3.5 19a5.5 5.5 0 0 1 11 0M17 8h4M19 6v4"/></svg><span class="tool-label">角色与物品</span></button>
+          <button id="btnMagicToggle" class="icon-btn menu-tool magic-toggle active has-tooltip" type="button" aria-label="隐藏魔法按钮" data-tooltip="隐藏魔法按钮" aria-pressed="true"><svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m15 4 5 5L8.5 20.5a2.1 2.1 0 0 1-3-3Z"/><path d="m13 6 5 5M5 3v3M3.5 4.5h3M19 15v4M17 17h4"/></svg><span class="tool-label">网页魔法按钮</span></button>
+        </div>
+      </details>
     </div>
   </header>
+  <nav id="workflowSteps" class="workflow-steps" aria-label="创作步骤" hidden>
+    <span id="stepSource"><i aria-hidden="true">1</i><span id="stepSourceLabel">参考图</span></span>
+    <span id="stepPrompt"><i aria-hidden="true">2</i><span>提示词</span></span>
+    <span id="stepGenerate"><i aria-hidden="true">3</i><span>生成图片</span></span>
+  </nav>
 
   <main>
     <section id="secPrivacy" class="privacy-card" hidden>
@@ -45,38 +54,36 @@
     <!-- 空状态：尚未选择图片 -->
     <section id="secEmpty" class="empty" hidden>
       <div class="empty-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="m15 4 5 5L8.5 20.5a2.1 2.1 0 0 1-3-3Z"/><path d="m13 6 5 5M5 3v3M3.5 4.5h3M19 15v4M17 17h4"/></svg></div>
-      <p class="empty-title">还没有选择图片</p>
-      <div class="first-use-guide">
+      <h2 class="empty-title">今天想怎么创作？</h2>
+      <p class="empty-subtitle">从一张喜欢的图片，或一句灵感开始。</p>
+      <div id="firstUseGuide" class="first-use-guide">
         <div class="first-use-heading">
           <span class="first-use-badge" aria-hidden="true">1</span>
-          <div><b>第一次使用？</b><p>如果您是第一次使用，请先打开设置，添加API key，并配置好默认模型。</p></div>
+          <div><b>先完成一次配置</b><p>选择平台 → 填入密钥 → 选择模型 → 保存</p></div>
         </div>
-        <button id="btnEmptyOptions" class="empty-settings-link" type="button">打开设置</button>
+        <button id="btnEmptyOptions" class="empty-settings-link" type="button">开始配置</button>
       </div>
-      <div class="empty-tips">
-        <p>将鼠标移到网页图片上，点击魔法按钮；目标不是图片时，可使用框选截图。</p>
-        <p>也可以把本地图片拖入侧边栏；有兼容的生成提示词时直接读取，没有时再进行反推。</p>
-        <p>也可以直接使用“惊喜创作”，随机生成提示词后再生成图片。</p>
+      <div class="creation-entry reference-entry">
+        <div><b>参考图拍同款</b><p>在网页图片上点击魔法按钮，或选择本地图片。</p></div>
+        <div class="reference-actions">
+          <button id="btnUploadSource" class="btn primary" type="button">选择图片</button>
+          <button id="btnCapture2" class="btn ghost" type="button"><span>框选截图</span></button>
+        </div>
+        <span class="entry-hint">也可以直接拖入图片；优先读取图片中的提示词。</span>
       </div>
       <div class="empty-actions">
-        <button id="btnSurprise2" class="empty-action" type="button">
-          <span class="empty-action-icon"><svg class="magic-hat-icon" viewBox="0 0 24 24" aria-hidden="true"><path class="hat-rabbit" d="M9.4 13.7c-.9-2.3-1.2-4.9.1-5.4 1.1-.4 2 1.4 2.5 3 .5-1.6 1.4-3.4 2.5-3 1.3.5 1 3.1.1 5.4"/><path d="M5 15.4c0-1.3 3.1-2.3 7-2.3s7 1 7 2.3-3.1 2.3-7 2.3-7-1-7-2.3Zm1.8 1.3L8 21h8l1.2-4.3"/><path class="hat-stars" d="m6.1 4.4.42 1 .98.42-.98.42-.42 1-.42-1-.98-.42.98-.42.42-1Zm11.8.2.36.86.86.36-.86.36-.36.86-.36-.86-.86-.36.86-.36.36-.86ZM11.8 3v2.1M10.75 4.05h2.1"/></svg></span>
-          <span>给我惊喜</span>
-        </button>
-        <button id="btnCapture2" class="empty-action" type="button">
-          <span class="empty-action-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M8 21H5a2 2 0 0 1-2-2v-3M16 21h3a2 2 0 0 0 2-2v-3"/><rect x="7" y="8" width="10" height="8" rx="2"/><circle cx="12" cy="12" r="2.2"/></svg></span>
-          <span>框选截图</span>
-        </button>
-        <button id="btnAlbum2" class="empty-action" type="button">
-          <span class="empty-action-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="15" rx="2"/><circle cx="8.5" cy="10" r="1.5"/><path d="m4 17 4.5-4 3.5 3 2.5-2 5.5 5"/></svg></span>
-          <span>打开相册</span>
-        </button>
+        <button id="btnManualEntry" class="empty-action" type="button"><span class="entry-symbol" aria-hidden="true">Aa</span><span><b>输入提示词</b><small>把自己的想法变成图片</small></span><span aria-hidden="true">→</span></button>
+        <button id="btnSurprise2" class="empty-action" type="button"><span class="entry-symbol" aria-hidden="true">✦</span><span><b>随机灵感</b><small>让 AI 为你准备提示词</small></span><span aria-hidden="true">→</span></button>
+        <button id="btnAlbum2" class="empty-action" type="button"><span class="entry-symbol" aria-hidden="true">▧</span><span><b>浏览相册</b><small>查看作品，继续创作</small></span><span aria-hidden="true">→</span></button>
       </div>
+      <input id="sourceFile" type="file" accept="image/*" hidden />
     </section>
 
     <!-- 来源图片 -->
     <section id="secSource" class="card" hidden>
-      <div class="card-title">来源图片</div>
+      <div class="card-title row"><span>① 选择参考图</span><span class="spacer"></span><button id="btnSourcePreview" class="btn mini ghost" type="button" aria-expanded="true" aria-controls="sourcePreview">收起预览</button><button id="btnChangeSource" class="btn mini ghost" type="button">换图</button></div>
+      <div id="sourceCompact" class="source-compact" hidden><img id="sourceCompactImg" alt="参考图缩略图" /><span id="sourceCompactText"></span></div>
+      <div id="sourcePreview">
       <div class="source-box">
         <div id="srcPlaceholder" class="source-placeholder" role="status" aria-label="正在读取图片">
           <div class="source-shimmer"></div>
@@ -85,6 +92,7 @@
         <div class="source-status" id="srcStatus">正在获取图片…</div>
       </div>
       <div class="source-meta" id="srcMeta"></div>
+      </div>
     </section>
 
     <section id="surpriseChoices" class="card surprise-choices" hidden>
@@ -96,14 +104,14 @@
     <!-- 提示词 -->
     <section id="secPrompt" class="card" hidden>
       <div class="card-title row">
-        <span>提示词</span>
+        <span>② 查看或修改提示词</span>
         <span class="spacer"></span>
         <button id="btnReverse" class="btn mini">重新反推</button>
         <button id="btnCopyPrompt" class="btn mini ghost">复制</button>
       </div>
       <div id="surpriseNotice" class="surprise-notice" hidden>
         <span>
-          <b><span aria-hidden="true">🎲</span><span>惊喜创作模式</span></b>
+          <b><span aria-hidden="true">🎲</span><span id="creationModeLabel">惊喜创作模式</span></b>
           <small id="surpriseProfile">不使用参考图</small>
         </span>
         <button id="btnSurpriseAgain" class="btn mini ghost" type="button">再来一次</button>
@@ -115,7 +123,7 @@
             <path d="M8 2.5V5M12 2.5V5M16 2.5V5M8 19v2.5M12 19v2.5M16 19v2.5M2.5 8H5M2.5 12H5M2.5 16H5M19 8h2.5M19 12h2.5M19 16h2.5"></path>
             <path d="m9 15 3-7 3 7M10 12.8h4"></path>
           </svg>
-          <span class="field-label-text sr-only">AI反推模型</span>
+          <span class="field-label-text">看图模型</span>
         </label>
         <select id="selVisionModel" title="切换并保存为默认反推模型"></select>
       </div>
@@ -142,7 +150,7 @@
 
     <!-- 生成设置 -->
     <section id="secGen" class="card" hidden>
-      <div class="card-title">生成设置</div>
+      <div class="card-title">③ 生成图片</div>
       <div class="form-row generation-field">
         <label class="field-icon has-tooltip" for="selRatio" tabindex="0" aria-label="图片比例" data-tooltip="图片比例">
           <svg class="field-symbol ratio-symbol" viewBox="0 0 24 24" aria-hidden="true">
@@ -151,7 +159,7 @@
             <path d="m4.5 18 4.2-3.8 2.8 2.5 2-1.8 2 1.8"></path>
             <path d="M7 7V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2h-2M15 5h4v4M19 5l-5 5"></path>
           </svg>
-          <span class="sr-only">图片比例</span>
+          <span class="field-label-text">图片比例</span>
         </label>
         <div class="generation-control">
           <select id="selRatio">
@@ -173,32 +181,14 @@
             <path d="M8 2.5V5M12 2.5V5M16 2.5V5M8 19v2.5M12 19v2.5M16 19v2.5M2.5 8H5M2.5 12H5M2.5 16H5M19 8h2.5M19 12h2.5M19 16h2.5"></path>
             <path d="m9 15 3-7 3 7M10 12.8h4"></path>
           </svg>
-          <span class="sr-only">AI生图模型</span>
+          <span class="field-label-text">生图模型</span>
         </label>
         <div class="generation-control">
           <select id="selImageModel" title="切换并保存为默认生图模型"></select>
         </div>
       </div>
       <div class="model-hint hint" id="modelHint"></div>
-      <div class="generate-actions">
-        <button id="btnGenerate" class="btn primary generate-main">✨ 生成图片</button>
-        <button id="btnCancelGroup" class="btn danger group-stop icon-action has-tooltip" type="button" aria-label="停止任务" data-tooltip="停止任务" hidden>
-          <svg class="action-icon" viewBox="0 0 24 24" aria-hidden="true">
-            <circle cx="12" cy="12" r="8.5"></circle>
-            <rect class="stop-square" x="8.5" y="8.5" width="7" height="7" rx="1"></rect>
-          </svg>
-        </button>
-        <button id="btnShowReplace" class="btn ghost replace-toggle icon-action has-tooltip" type="button" aria-expanded="false" aria-controls="secReplace" aria-disabled="false" aria-label="替换角色/物品" data-tooltip="替换角色/物品">
-          <svg class="action-icon" viewBox="0 0 24 24" aria-hidden="true">
-            <circle cx="7.5" cy="7" r="3"></circle>
-            <path d="M2.8 18c.6-3.9 2.2-6 4.7-6s4.1 2.1 4.7 6"></path>
-            <path d="M15 7h6m-2.2-2.2L21 7l-2.2 2.2M21 15h-6m2.2-2.2L15 15l2.2 2.2"></path>
-          </svg>
-        </button>
-      </div>
-      <div id="genProgress" class="loading" hidden>
-        <span class="spinner"></span><span id="genText">正在生成，通常需要 10–60 秒…</span>
-      </div>
+
       <div id="genDone" class="done-tag" hidden>✓ 生成成功</div>
       <div id="genError" class="error" hidden></div>
     </section>
@@ -206,7 +196,7 @@
     <section id="secReplace" class="card feature-card" hidden>
       <div class="card-title row"><span>替换角色或者物品</span><span class="spacer"></span><button id="btnOpenCharacters" class="btn mini ghost">管理素材</button></div>
       <p class="feature-desc">保持构图、背景和光影基本不变，只替换目标人物、角色或物品。请选择支持图生图/edit 的模型。</p>
-      <div id="characterPicker" class="character-picker"></div>
+      <div class="replacement-pair"><div class="replacement-base"><img id="replaceSourceThumb" alt="当前原图" /><span>当前原图</span></div><span class="pair-arrow" aria-hidden="true">→</span><div class="replacement-material"><span class="material-label">替换素材</span><div id="characterPicker" class="character-picker"></div></div></div>
       <div class="replace-type-row">
         <label for="replaceType">替换类型</label>
         <select id="replaceType">
@@ -215,8 +205,7 @@
           <option value="clothing">服装或穿搭</option>
         </select>
       </div>
-      <textarea id="replaceInstruction" rows="8" aria-label="替换角色或者物品提示词"></textarea>
-      <button id="btnReplaceGenerate" class="btn primary big" type="button">✨ 开始替换</button>
+      <details id="replaceAdvanced" class="advanced-instructions"><summary>高级指令</summary><p class="feature-desc">已有默认指令，可按需修改。</p><textarea id="replaceInstruction" rows="8" aria-label="替换角色或者物品提示词"></textarea></details>
       <div id="replaceProgress" class="loading replace-status" hidden>
         <span class="spinner"></span><span id="replaceProgressText">正在替换角色或者物品…</span>
       </div>
@@ -238,6 +227,29 @@
 
     <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
   </main>
+  <footer id="actionDock" class="action-dock" aria-label="创作操作" hidden>
+    <div id="actionDockSummary" class="dock-summary"></div>
+    <div id="genProgress" class="loading" role="status" aria-live="off" aria-label="生图任务进度" hidden>
+      <span class="spinner" aria-hidden="true"></span><span id="genText">正在生成，通常需要 10–60 秒…</span>
+    </div>
+      <div class="generate-actions">
+        <button id="btnGenerate" class="btn primary generate-main">✨ 生成图片</button>
+        <button id="btnCancelGroup" class="btn danger group-stop icon-action has-tooltip" type="button" aria-label="停止任务" data-tooltip="停止任务" hidden>
+          <svg class="action-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="12" cy="12" r="8.5"></circle>
+            <rect class="stop-square" x="8.5" y="8.5" width="7" height="7" rx="1"></rect>
+          </svg>
+        </button>
+        <button id="btnShowReplace" class="btn ghost replace-toggle icon-action has-tooltip" type="button" aria-expanded="false" aria-controls="secReplace" aria-disabled="false" aria-label="替换角色/物品" data-tooltip="替换角色/物品">
+          <svg class="action-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="7.5" cy="7" r="3"></circle>
+            <path d="M2.8 18c.6-3.9 2.2-6 4.7-6s4.1 2.1 4.7 6"></path>
+            <path d="M15 7h6m-2.2-2.2L21 7l-2.2 2.2M21 15h-6m2.2-2.2L15 15l2.2 2.2"></path>
+          </svg><span id="replaceToggleLabel">替换</span>
+        </button>
+        <button id="btnReplaceGenerate" class="btn primary generate-main" type="button" hidden>✨ 开始替换</button>
+      </div>
+  </footer>
 
   <div id="characterDialog" class="manager-dialog" hidden>
     <div id="characterBackdrop" class="manager-backdrop"></div>

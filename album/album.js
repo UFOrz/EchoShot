@@ -40,6 +40,7 @@ const els = {
   btnSelectAll: $('btnSelectAll'),
   btnDownloadSel: $('btnDownloadSel'),
   btnDeleteSel: $('btnDeleteSel'),
+  btnClearSelection: $('btnClearSelection'),
   btnOptions: $('btnOptions'),
   pager: $('pager'),
   btnPrevPage: $('btnPrevPage'),
@@ -59,6 +60,7 @@ const els = {
   lbCompareDivider: $('lbCompareDivider'),
   lbResultLabel: $('lbResultLabel'),
   lbCompareToggle: $('lbCompareToggle'),
+  lbCompareLabel: $('lbCompareLabel'),
   lbAddCharacter: $('lbAddCharacter'),
   lbPrev: $('lbPrev'),
   lbNext: $('lbNext'),
@@ -89,12 +91,20 @@ const els = {
   toast: $('toast')
 };
 
+// The sticky progress strip follows the real header height in every language and viewport.
+const topbar = document.querySelector('.topbar');
+const topbarObserver = new ResizeObserver(() => {
+  document.documentElement.style.setProperty('--album-topbar-height', `${topbar.offsetHeight}px`);
+});
+topbarObserver.observe(topbar);
+
 let records = [];        // 全部记录
 let filtered = [];       // 搜索过滤后
 const selected = new Set();
 const objectUrls = new Map(); // id -> objectURL
 const sourceObjectUrls = new Map(); // id -> 原图 objectURL
 let currentLbId = null;
+let lightboxReturnFocus = null;
 let toastTimer = 0;
 let comparisonReady = false;
 let comparisonEnabled = false;
@@ -299,6 +309,14 @@ function createAlbumCard(rec) {
   img.loading = 'lazy';
   img.src = urlOf(rec);
   img.alt = rec.prompt || '';
+  img.tabIndex = 0;
+  img.setAttribute('role', 'button');
+  img.setAttribute('aria-label', t('查看大图', {}, currentLanguage));
+  img.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    event.preventDefault();
+    openLightbox(rec.id);
+  });
   img.addEventListener('load', scheduleMasonryLayout, { once: true });
   img.addEventListener('error', scheduleMasonryLayout, { once: true });
   const intrinsicWidth = Number(rec.width);
@@ -308,10 +326,13 @@ function createAlbumCard(rec) {
     img.height = Math.round(intrinsicHeight);
   }
 
-  const check = document.createElement('div');
+  const check = document.createElement('button');
+  check.type = 'button';
   check.className = 'check';
   check.textContent = '✓';
   check.title = t('选择', {}, currentLanguage);
+  check.setAttribute('aria-label', t('选择', {}, currentLanguage));
+  check.setAttribute('aria-pressed', String(selected.has(rec.id)));
   check.addEventListener('click', (e) => {
     e.stopPropagation();
     toggleSelect(rec.id, card);
@@ -338,6 +359,7 @@ function createAlbumCard(rec) {
   const m = document.createElement('div');
   m.className = 'm';
   m.textContent = `${fmtTime(rec.createdAt)} · ${displayedRecordModel(rec)}`;
+  m.title = m.textContent;
   foot.append(p);
   if (zh) foot.append(zh);
   foot.append(m);
@@ -387,6 +409,7 @@ function renderGrid({ animate = false } = {}) {
   for (const rec of filtered) {
     const card = oldCards.get(rec.id) || createAlbumCard(rec);
     card.classList.toggle('selected', selected.has(rec.id));
+    card.querySelector('.check').setAttribute('aria-pressed', String(selected.has(rec.id)));
     while (cursor?.classList.contains('is-removing')) cursor = cursor.nextElementSibling;
     if (card === cursor) cursor = cursor.nextElementSibling;
     else els.grid.insertBefore(card, cursor);
@@ -468,6 +491,7 @@ function toggleSelect(id, cardEl) {
   if (selected.has(id)) selected.delete(id);
   else selected.add(id);
   cardEl?.classList.toggle('selected', selected.has(id));
+  cardEl?.querySelector('.check').setAttribute('aria-pressed', String(selected.has(id)));
   updateSelUI();
 }
 
@@ -475,7 +499,7 @@ function updateSelUI() {
   const n = selected.size;
   els.selBar.hidden = n === 0;
   els.selCount.textContent = n;
-  els.btnSelectAll.disabled = downloadingAll;
+  els.btnSelectAll.disabled = downloadingAll || filtered.length === 0;
   els.btnDownloadSel.disabled = downloadingAll || n === 0;
   els.btnDeleteSel.disabled = downloadingAll || n === 0;
   els.btnDownloadAll.disabled = downloadingAll || totalAlbumRecords === 0;
@@ -484,7 +508,8 @@ function updateSelUI() {
     : t('下载整个相册（共 {count} 张）', { count: totalAlbumRecords }, currentLanguage);
   const visibleIds = filtered.map((r) => r.id);
   const allSelected = visibleIds.length > 0 && visibleIds.every((id) => selected.has(id));
-  els.btnSelectAll.textContent = t(allSelected ? '取消全选' : '全选', {}, currentLanguage);
+  els.btnSelectAll.textContent = t(allSelected ? '取消本页选择' : '选择本页', {}, currentLanguage);
+  els.btnSelectAll.setAttribute('aria-pressed', String(allSelected));
 }
 
 // ---------- 灯箱 ----------
@@ -494,12 +519,18 @@ function setIconButtonHint(button, key, { disabled = button.disabled, state } = 
   button.disabled = disabled;
   button.setAttribute('aria-label', label);
   button.dataset.tooltip = label;
+  if (button === els.lbCompareToggle) {
+    const visibleKey = key === '开启对比' ? '对比原图' : key === '关闭对比' ? '结束对比' : key;
+    els.lbCompareLabel.textContent = t(visibleKey, {}, currentLanguage);
+  }
   if (state) button.dataset.state = state;
 }
 
 function openLightbox(id) {
   const rec = records.find((r) => r.id === id);
   if (!rec) return;
+  const opening = els.lightbox.hidden;
+  if (opening) lightboxReturnFocus = document.activeElement;
   currentLbId = id;
   els.lbImg.src = urlOf(rec);
   void setupComparison(rec).catch(() => {
@@ -534,6 +565,7 @@ function openLightbox(id) {
 
   els.lightbox.hidden = false;
   document.body.style.overflow = 'hidden';
+  if (opening) els.lbClose.focus({ preventScroll: true });
 }
 
 async function updateAddCharacterButton(recordId) {
@@ -665,9 +697,27 @@ function navigateLightbox(delta) {
 }
 
 function closeLightbox() {
+  const wasOpen = !els.lightbox.hidden;
   els.lightbox.hidden = true;
   document.body.style.overflow = '';
   currentLbId = null;
+  if (wasOpen && lightboxReturnFocus?.isConnected) lightboxReturnFocus.focus({ preventScroll: true });
+  lightboxReturnFocus = null;
+}
+
+function containDialogFocus(event, dialog) {
+  if (event.key !== 'Tab') return;
+  const controls = [...dialog.querySelectorAll('button:not(:disabled), select:not(:disabled), input:not(:disabled), a[href], summary, [tabindex="0"]')]
+    .filter(element => element.getClientRects().length && !element.closest('[hidden]'));
+  const first = controls[0], last = controls.at(-1);
+  if (!first) return;
+  if (!dialog.contains(document.activeElement) || (event.shiftKey && document.activeElement === first)) {
+    event.preventDefault();
+    (event.shiftKey ? last : first).focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
+  }
 }
 
 // ---------- 下载 ----------
@@ -901,8 +951,19 @@ els.btnSelectAll.addEventListener('click', () => {
   else visibleIds.forEach((id) => selected.add(id));
   for (const card of els.grid.querySelectorAll(':scope > .card:not(.is-removing)')) {
     card.classList.toggle('selected', selected.has(card.dataset.id));
+    card.querySelector('.check').setAttribute('aria-pressed', String(selected.has(card.dataset.id)));
   }
   updateSelUI();
+});
+
+els.btnClearSelection.addEventListener('click', () => {
+  selected.clear();
+  for (const card of els.grid.querySelectorAll(':scope > .card:not(.is-removing)')) {
+    card.classList.remove('selected');
+    card.querySelector('.check').setAttribute('aria-pressed', 'false');
+  }
+  updateSelUI();
+  els.btnSelectAll.focus({ preventScroll: true });
 });
 
 els.btnDownloadSel.addEventListener('click', () => {
@@ -972,10 +1033,12 @@ els.lbClose.addEventListener('click', closeLightbox);
 els.lbBackdrop.addEventListener('click', closeLightbox);
 document.addEventListener('keydown', (e) => {
   if (!els.confirmDialog.hidden) {
+    containDialogFocus(e, els.confirmDialog);
     if (e.key === 'Escape') closeDeleteConfirmation(false);
     return;
   }
   if (els.lightbox.hidden) return;
+  containDialogFocus(e, els.lightbox);
   if (e.key === 'Escape') closeLightbox();
   else if (e.key === 'ArrowLeft') { e.preventDefault(); navigateLightbox(-1); }
   else if (e.key === 'ArrowRight') { e.preventDefault(); navigateLightbox(1); }
@@ -1165,6 +1228,7 @@ chrome.storage.local.onChanged.addListener((changes) => {
 });
 
 window.addEventListener('pagehide', () => {
+  topbarObserver.disconnect();
   for (const animation of cardAnimations.values()) animation.cancel();
   if (masonryLayoutFrame) cancelAnimationFrame(masonryLayoutFrame);
   clearTimeout(searchTimer);

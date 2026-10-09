@@ -201,6 +201,11 @@ let taskWriteChain = Promise.resolve();
 let settingsWriteChain = Promise.resolve();
 let taskPersistTimer = 0;
 let privacyConsentGranted = false;
+const actionDockSizeObserver = new ResizeObserver(() => {
+  const height = $('actionDock').offsetHeight;
+  if (height > 0) document.body.style.setProperty('--action-dock-height', `${height}px`);
+});
+actionDockSizeObserver.observe($('actionDock'));
 let characters = [];
 let selectedCharacterId = '';
 let currentWindowId = null;
@@ -215,12 +220,16 @@ let generationJobsTimer = 0;
 let generationJobsRenderChain = Promise.resolve();
 let generationSubmitLocked = false;
 const presentedGenerationJobIds = new Set();
+// 当前面板见过的运行中任务，即使切换反推来源，也要展示它们的完成结果。
+const observedGenerationJobIds = new Set();
 let visibleReverseJobState = null;
 let visibleReverseJobTimer = 0;
 let resultRevealToken = 0;
 let regionCaptureActive = false;
 let dragDepth = 0;
 let droppedImageSeq = 0;
+let sourcePreviewOverride = null;
+let workspaceSyncQueued = false;
 let surpriseMode = false;
 let surpriseGenerating = false;
 let currentSurpriseProfile = '';
@@ -358,7 +367,64 @@ function showToast(text) {
   toastTimer = setTimeout(() => (els.toast.hidden = true), duration);
 }
 
-function show(el, yes = true) { el.hidden = !yes; }
+function show(el, yes = true) {
+  el.hidden = !yes;
+  scheduleWorkspaceSync();
+}
+
+// Keep the original action buttons and task handlers; only their surrounding UI changes.
+function scheduleWorkspaceSync() {
+  if (workspaceSyncQueued) return;
+  workspaceSyncQueued = true;
+  queueMicrotask(() => { workspaceSyncQueued = false; syncWorkspaceChrome(); });
+}
+
+function syncWorkspaceChrome() {
+  const workspaceVisible = els.secPrivacy.hidden && (!els.secPrompt.hidden || !els.secSource.hidden || !$('surpriseChoices').hidden);
+  const promptReady = Boolean(els.taPrompt.value.trim()) && !reversing && !surpriseGenerating;
+  const replacing = !els.secReplace.hidden;
+  $('workflowSteps').hidden = !workspaceVisible;
+  $('actionDock').hidden = !els.secPrivacy.hidden || (els.secGen.hidden && els.btnCancelGroup.hidden);
+  document.body.classList.toggle('has-action-dock', !$('actionDock').hidden);
+  $('actionDockSummary').hidden = !els.genProgress.hidden;
+  els.btnGenerate.hidden = replacing;
+  $('btnReplaceGenerate').hidden = !replacing;
+  $('replaceToggleLabel').textContent = ui(replacing ? '返回生成' : '替换');
+  const choice = listModelChoices(settings || { platforms: [] }, 'image').find(item => choiceValue(item) === els.selImageModel.value);
+  $('actionDockSummary').textContent = replacing
+    ? ui('替换素材后，保留原图构图')
+    : [els.selRatio.value, choice?.label || ui('请选择生图模型')].filter(Boolean).join(' · ');
+  const states = [source?.status === 'ready' ? 'done' : 'current', promptReady ? 'done' : 'current', promptReady ? (lastResult ? 'done' : 'current') : 'pending'];
+  if (source?.status !== 'ready') states[1] = 'pending';
+  ['stepSource', 'stepPrompt', 'stepGenerate'].forEach((id, index) => {
+    const step = $(id);
+    step.dataset.state = states[index];
+    if (states[index] === 'current') step.setAttribute('aria-current', 'step');
+    else step.removeAttribute('aria-current');
+    step.querySelector('i').textContent = states[index] === 'done' ? '✓' : String(index + 1);
+  });
+  $('stepSourceLabel').textContent = ui(surpriseMode ? '创作方式' : '参考图');
+  $('creationModeLabel').textContent = ui(currentSurpriseProfile === 'manual' ? '输入提示词' : '随机灵感');
+  const compact = !els.secSource.hidden && source?.status === 'ready' && (sourcePreviewOverride === false || (sourcePreviewOverride == null && promptReady));
+  $('sourcePreview').hidden = compact;
+  $('sourceCompact').hidden = !compact;
+  $('btnSourcePreview').hidden = source?.status !== 'ready';
+  $('btnSourcePreview').textContent = ui(compact ? '展开预览' : '收起预览');
+  $('btnSourcePreview').setAttribute('aria-expanded', String(!compact));
+  if (source?.dataUrl) {
+    for (const id of ['sourceCompactImg', 'replaceSourceThumb']) {
+      if ($(id).getAttribute('src') !== source.dataUrl) $(id).src = source.dataUrl;
+    }
+    $('sourceCompactText').textContent = ui('参考图已就绪 · {width}×{height}', { width: source.width, height: source.height });
+  }
+  const configured = type => {
+    const selected = settings?.defaults?.[type];
+    const platform = settings?.platforms?.find(item => item.id === selected?.platformId);
+    const models = type === 'vision' ? platform?.visionModels : platform?.imageModels;
+    return Boolean(models?.includes(selected?.model) && platform && (platform.apiKey || /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(?=[:/]|$)/i.test(platform.baseUrl)));
+  };
+  $('firstUseGuide').hidden = configured('vision') && configured('image');
+}
 
 function setPromptDoneLabel(fromMetadata = false) {
   els.reverseDone.textContent = ui(fromMetadata
@@ -644,7 +710,7 @@ function setSurpriseModelState() {
   const label = ui('AI反推模型');
   els.visionModelLabel.setAttribute('aria-label', label);
   els.visionModelLabel.dataset.tooltip = label;
-  els.visionModelLabel.querySelector('.field-label-text').textContent = label;
+  els.visionModelLabel.querySelector('.field-label-text').textContent = ui('看图模型');
   els.selVisionModel.disabled = !els.selVisionModel.value;
 }
 
@@ -947,6 +1013,8 @@ async function openSurpriseChoices() {
 }
 
 async function openManualPrompt() {
+  if (!privacyConsentGranted) { renderPrivacyRequired(); return; }
+  if (generating || reversing || surpriseGenerating) return showToast(ui('当前已有生成任务进行中'));
   const task = { active: true, status: 'ready', profile: 'manual', profileLabel: '手动输入',
     prompt: '', sourceRequestId: `surprise:${crypto.randomUUID()}`, sourceTs: Date.now(), ratio: els.selRatio.value };
   await renderSurpriseTask(task, { restoreResult: false });
@@ -1020,6 +1088,7 @@ function applySource(s) {
   const isNew = sourceKey(source) !== sourceKey(s);
   const becameReady = s.status === 'ready' && (isNew || source?.status !== 'ready');
   if (isNew) {
+    sourcePreviewOverride = null;
     if (surpriseMode) void removeWindowSession('surpriseTask');
     reverseSeq += 1; // 让旧图片仍在等待的反推响应失效
     reversing = false;
@@ -1304,7 +1373,8 @@ function updateHints() {
   els.sizeHint.textContent = size ? `${ui('参考尺寸')} ${size}${note}` : '';
   const choice = listModelChoices(settings, 'image').find((item) =>
     choiceValue(item) === els.selImageModel.value);
-  els.modelHint.textContent = choice ? `${ui('默认生图')}：${choice.platformName} · ${choice.model}` : ui('尚未启用生图模型');
+  els.modelHint.textContent = choice ? ui('切换后自动保存为默认模型') : ui('尚未启用生图模型');
+  scheduleWorkspaceSync();
 }
 
 function renderGenerationJobsProgress() {
@@ -1334,6 +1404,9 @@ function setGenerationJobsState(jobs = []) {
   generationJobsState = (Array.isArray(jobs) ? jobs : [])
     .filter((job) => job && typeof job === 'object' && job.id)
     .sort((a, b) => (Number(a.startedAt) || 0) - (Number(b.startedAt) || 0));
+  for (const job of generationJobsState) {
+    if (job.status === 'running') observedGenerationJobIds.add(job.id);
+  }
   renderGenerationJobsProgress();
 }
 
@@ -1401,6 +1474,7 @@ async function generate() {
     sourceKey: sourceKey(sourceSnapshot) || (surpriseSnapshot ? sourceKey(source) : ''),
     label: surpriseSnapshot ? 'surprise-image' : 'generate'
   });
+  showToast(ui('已开始生成，可继续查看已有图片'));
 
   try {
     const resp = await send({ type: 'ir.job.generate', payload: {
@@ -1434,6 +1508,7 @@ async function generate() {
       else {
         els.genError.textContent = ui('生成失败：{error}', { error: resp?.error || ui('未知错误') });
         show(els.genError, true);
+        showToast(els.genError.textContent);
       }
       return;
     }
@@ -1441,6 +1516,7 @@ async function generate() {
     removeLocalGenerationJob(clientJobId);
     els.genError.textContent = ui('生成失败：{error}', { error: e?.message || e });
     show(els.genError, true);
+    showToast(els.genError.textContent);
   }
 }
 
@@ -1980,17 +2056,30 @@ async function renderGenerationJobsNow(jobs, { restore = false } = {}) {
   terminal.forEach((job) => presentedGenerationJobIds.add(job.id));
   const matching = terminal.filter((job) => generationJobBelongsToSource(job, source));
   const matchingCompleted = completedGenerationJobsForSource(generationJobsState, source);
+  const visibleCompleted = generationJobsState
+    .filter((job) => job.status === 'completed' &&
+      (generationJobBelongsToSource(job, source) || observedGenerationJobIds.has(job.id)))
+    .sort((a, b) => (Number(a.finishedAt || a.updatedAt || a.startedAt) || 0) -
+      (Number(b.finishedAt || b.updatedAt || b.startedAt) || 0));
   let newestCard = null;
   let newestRecord = null;
-  for (const job of matchingCompleted) {
+  for (const job of visibleCompleted) {
     const recordIds = Array.isArray(job.recordIds) && job.recordIds.length
       ? job.recordIds
       : [job.lastRecordId].filter(Boolean);
     const records = await loadJobRecords(recordIds);
     if (sourceKey(source) !== expectedSourceKey) return;
     for (const record of records) {
+      const belongsToCurrentSource = matchingCompleted.includes(job);
+      const previousResult = lastResult;
+      const previousAlbumRecordId = lastAlbumRecordId;
       newestCard = appendResultCard(record, { persist: false }) || newestCard;
-      newestRecord = record;
+      if (belongsToCurrentSource) newestRecord = record;
+      else {
+        // 旧任务仍可查看、下载，但不能成为新反推任务的相册关联。
+        lastResult = previousResult;
+        lastAlbumRecordId = previousAlbumRecordId;
+      }
     }
   }
   if (newestRecord) {
@@ -2010,6 +2099,7 @@ async function renderGenerationJobsNow(jobs, { restore = false } = {}) {
       error: latestFailure.error || ui('未知错误')
     });
     show(els.genError, true);
+    if (!restore) showToast(els.genError.textContent);
   }
 
   if (!matching.length && !restore) {
@@ -2223,7 +2313,8 @@ els.btnCancelGroup.addEventListener('click', cancelGroupJob);
 $('btnCapture').addEventListener('click', capturePage);
 $('btnCapture2').addEventListener('click', capturePage);
 $('btnSurprise').addEventListener('click', openSurpriseChoices);
-$('btnSurprise2').addEventListener('click', openSurpriseChoices);
+$('btnSurprise2').addEventListener('click', createSurprisePrompt);
+$('btnManualEntry').addEventListener('click', openManualPrompt);
 $('btnSurpriseStart').addEventListener('click', createSurprisePrompt);
 $('btnManualPrompt').addEventListener('click', openManualPrompt);
 $('btnSurpriseAgain').addEventListener('click', createSurprisePrompt);
@@ -2272,6 +2363,9 @@ $('characterPreviewClose').addEventListener('click', closeCharacterPreview);
 $('characterPreviewBackdrop').addEventListener('click', closeCharacterPreview);
 document.addEventListener('keydown', (event) => {
   if (event.key !== 'Escape') return;
+  const tools = $('moreTools');
+  if (tools.open && tools.contains(document.activeElement)) tools.querySelector('summary').focus();
+  tools.open = false;
   if (regionCaptureActive) {
     event.preventDefault();
     event.stopPropagation();
@@ -2316,6 +2410,7 @@ els.selImageModel.addEventListener('change', () => {
   void persistTask();
 });
 els.taPrompt.addEventListener('input', () => {
+  scheduleWorkspaceSync();
   clearTimeout(taskPersistTimer);
   taskPersistTimer = setTimeout(() => void persistTask(), 250);
 });
@@ -2324,6 +2419,34 @@ $('btnAlbum').addEventListener('click', () => sendQuietly({ type: 'ir.openAlbum'
 $('btnAlbum2').addEventListener('click', () => sendQuietly({ type: 'ir.openAlbum' }));
 $('btnEmptyOptions').addEventListener('click', () => sendQuietly({ type: 'ir.openOptions' }));
 $('btnOptions').addEventListener('click', () => sendQuietly({ type: 'ir.openOptions' }));
+$('btnHome').addEventListener('click', async () => {
+  if (!privacyConsentGranted) { renderPrivacyRequired(); return; }
+  if (generating || reversing || surpriseGenerating) return showToast(ui('当前已有生成任务进行中'));
+  await persistTask();
+  renderEmpty();
+});
+for (const id of ['btnUploadSource', 'btnChangeSource']) {
+  $(id).addEventListener('click', () => $('sourceFile').click());
+}
+$('sourceFile').addEventListener('change', async event => {
+  const file = event.target.files?.[0];
+  if (!file) return;
+  try { await handleDroppedImage(file); }
+  catch (error) { showToast(ui('图片读取失败：{error}', { error: error?.message || String(error) })); }
+  finally { event.target.value = ''; }
+});
+$('btnSourcePreview').addEventListener('click', () => {
+  sourcePreviewOverride = $('sourcePreview').hidden;
+  scheduleWorkspaceSync();
+});
+document.addEventListener('click', event => {
+  if (!event.target.closest('#moreTools') || event.target.closest('.tools-menu button')) {
+    const tools = $('moreTools');
+    if (tools.open && tools.querySelector('.tools-menu').contains(document.activeElement)) tools.querySelector('summary').focus();
+    tools.open = false;
+  }
+});
+
 $('privacyConsentCheck').addEventListener('change', (e) => {
   $('btnPrivacyAgree').disabled = !e.target.checked;
 });
