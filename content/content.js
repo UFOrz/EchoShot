@@ -344,13 +344,32 @@
       const rect = other.getBoundingClientRect();
       if (rect.width >= MIN_SIZE && rect.height >= MIN_SIZE && isRenderedImage(other)) return false;
     }
-    return [...el.querySelectorAll(`${PAGE_CONTROL_SELECTOR},[aria-label],[title]`)].some((control) => {
+    if ([...el.querySelectorAll(`${PAGE_CONTROL_SELECTOR},[aria-label],[title]`)].some((control) => {
       const rect = control.getBoundingClientRect();
       return rect.width > 0 && rect.width <= 160 && rect.height > 0 && rect.height <= 96 &&
         rect.left >= cardRect.left - 12 && rect.top >= cardRect.top - 12 &&
         rect.right <= cardRect.right + 12 && rect.bottom <= cardRect.bottom + 12 &&
         isPageControl(control, img);
-    });
+    })) return true;
+    // 京东等列表用空的透明分区切换商品图片，分区本身并未遮住图片。
+    // 只接受与当前单张可见图片同尺寸的容器，文字、绘制层和独立遮罩仍阻挡选图。
+    if (el.tagName !== 'DIV' || el.textContent.trim() ||
+        el.querySelector(`${PAGE_CONTROL_SELECTOR},${PAGE_OBSTRUCTION_SELECTOR},[aria-label],[title]`) ||
+        ['left', 'top', 'right', 'bottom'].some((side) =>
+          Math.abs(cardRect[side] - imageRect[side]) > 4)) return false;
+    for (const node of [el, ...el.querySelectorAll('*')]) {
+      if (node.tagName !== 'DIV' || node.matches(`${PAGE_CONTROL_SELECTOR},[aria-label],[title]`)) return false;
+      const nodeStyle = getComputedStyle(node);
+      if (nodeStyle.display === 'none' || nodeStyle.visibility === 'hidden' || nodeStyle.opacity === '0') continue;
+      if (hasLayerPaint(nodeStyle)) return false;
+      for (const pseudo of ['::before', '::after']) {
+        const pseudoStyle = getComputedStyle(node, pseudo);
+        if (!['none', 'normal', ''].includes(pseudoStyle.content) &&
+            pseudoStyle.display !== 'none' && pseudoStyle.visibility !== 'hidden' &&
+            pseudoStyle.opacity !== '0' && hasLayerPaint(pseudoStyle)) return false;
+      }
+    }
+    return true;
   }
 
   function hasLayerPaint(style) {
