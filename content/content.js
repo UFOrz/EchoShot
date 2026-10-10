@@ -36,6 +36,7 @@
   let currentCorner = -1;
   let cornerInsetOffset = 0;
   let interiorPosition = null;
+  let fallbackPosition = false;
   let lastX = 0;
   let lastY = 0;
   let magicButtonVisible = true;
@@ -209,7 +210,11 @@
       if (isPageControl(el, img)) return 'blocked';
       // 圆角空隙会露出卡片后方的兄弟层；仅检查图片祖先之前的前景。
       // 命中图片时仍继续到图片，兼容链接伪元素排在图片之前的正常命中栈。
-      if (!hitsImage && el.contains(img)) return 'clipped';
+      if (!hitsImage && el.contains(img)) {
+        // 可见 IMG 禁用命中时由其容器接收鼠标；前景控件仍已逐项检查。
+        if (getComputedStyle(img).pointerEvents === 'none') return 'clear';
+        return 'clipped';
+      }
     }
     return 'clipped'; // 圆角等裁切区域没有命中图片，可尝试将角落位置向内移动。
   }
@@ -221,6 +226,7 @@
     if (!isRenderedElement(el)) return false;
     if (el === imagePaintLayer(img)) return false;
     if (isProductZoomLens(el, img)) return false;
+    if (isGenericImageHoverLayer(el, img)) return false;
     if (isSiteImageHoverLayer(el, img)) return false;
     // 图片卡片的透明按钮容器并未遮住图片；实际按钮仍由控件检测避让。
     // 独立遮罩、跨卡片容器和不透明覆盖层继续阻挡图片选择。
@@ -314,6 +320,84 @@
       }
     }
     return true;
+  }
+
+  function localImageLayer(el, img) {
+    if (!(el instanceof Element) || el === img || el.contains(img) || img.contains(el) ||
+        el.matches(PAGE_OBSTRUCTION_SELECTOR) || !isRenderedElement(el)) return false;
+    const modal = el.closest('dialog,[role="dialog"],[aria-modal="true"]');
+    if (modal && !modal.contains(img)) return false;
+    // 最近的公共容器必须仍是单图卡片；页面级遮罩不能借用其下方图片。
+    let card = el.parentElement;
+    while (card && !card.contains(img)) card = card.parentElement;
+    if (!card || card === document.body || card === document.documentElement) return false;
+    const imageRect = clippedRect(img, false);
+    const cardRect = clippedRect(card, false);
+    const layerRect = clippedRect(el, false);
+    if (imageRect.width < MIN_SIZE || imageRect.height < MIN_SIZE ||
+        cardRect.width > imageRect.width + 80 || cardRect.height > imageRect.height + 120 ||
+        layerRect.width <= 0 || layerRect.height <= 0 ||
+        layerRect.left < imageRect.left - 4 || layerRect.top < imageRect.top - 4 ||
+        layerRect.right > imageRect.right + 4 || layerRect.bottom > imageRect.bottom + 4 ||
+        getComputedStyle(el).position === 'fixed') return false;
+    for (const other of card.querySelectorAll('img')) {
+      if (other === img) continue;
+      const rect = other.getBoundingClientRect();
+      if (rect.width >= MIN_SIZE && rect.height >= MIN_SIZE && isRenderedImage(other)) return false;
+    }
+    for (const node of el.querySelectorAll(`${PAGE_OBSTRUCTION_SELECTOR},dialog,[role="dialog"],[aria-modal="true"]`)) {
+      if (isRenderedElement(node)) return false;
+    }
+    return true;
+  }
+
+  function isGenericImageHoverLayer(el, img) {
+    // 单图卡片的轻微变暗层按结构识别，不依赖网站域名和类名。
+    // 图层中的小型实际控件由正常的控件检测和定位继续避让。
+    if (el.matches(PAGE_CONTROL_SELECTOR) || !localImageLayer(el, img)) return false;
+    const imageRect = clippedRect(img, false);
+    const layerRect = clippedRect(el, false);
+    if (['left', 'top', 'right', 'bottom'].some((side) =>
+        Math.abs(layerRect[side] - imageRect[side]) > 4)) return false;
+    let remainingVisibility = 1;
+    for (const node of [el, ...el.querySelectorAll('*')]) {
+      if (!isRenderedElement(node)) continue;
+      const style = getComputedStyle(node);
+      const rect = clippedRect(node, false);
+      const large = rect.width >= MIN_SIZE && rect.height >= MIN_SIZE;
+      if (node === el || large) {
+        if (node.matches(PAGE_CONTROL_SELECTOR) || style.backgroundImage !== 'none' ||
+            (style.backdropFilter && style.backdropFilter !== 'none') ||
+            (style.filter && style.filter !== 'none')) return false;
+        remainingVisibility *= 1 - paintAlpha(style.backgroundColor) * Number(style.opacity);
+        if (remainingVisibility < .65) return false;
+        for (const pseudo of ['::before', '::after']) {
+          const pseudoStyle = getComputedStyle(node, pseudo);
+          if (!['none', 'normal', ''].includes(pseudoStyle.content) &&
+              pseudoStyle.display !== 'none' && pseudoStyle.visibility !== 'hidden' &&
+              pseudoStyle.opacity !== '0' && hasLayerPaint(pseudoStyle)) return false;
+        }
+      }
+    }
+    return true;
+  }
+
+  function fallbackPointAllows(x, y, img, allowControls = false, stack = document.elementsFromPoint(x, y)) {
+    if (!img.isConnected || !isRenderedImage(img)) return false;
+    const rect = clippedRect(img);
+    if (x < rect.left || x >= rect.right || y < rect.top || y >= rect.bottom) return false;
+    for (const el of stack) {
+      if (el === host) continue;
+      if (el.matches?.(PAGE_OBSTRUCTION_SELECTOR)) return false;
+      const modal = el.closest?.('dialog,[role="dialog"],[aria-modal="true"]');
+      if (modal && !modal.contains(img)) return false;
+      if (el === img) return true;
+      if (el.contains(img)) return true; // 图片圆角裁切，仍以图片可见矩形定位。
+      if (!isRenderedElement(el)) continue;
+      if (el === imagePaintLayer(img)) continue;
+      if ((!allowControls && isPageControl(el, img)) || !localImageLayer(el, img)) return false;
+    }
+    return false;
   }
 
   function isImageActionLayer(el, img) {
@@ -480,6 +564,12 @@
   // 找到坐标下第一张足够大的 <img>，但不穿过网页上的可交互控件。
   function findImgAt(x, y) {
     const els = document.elementsFromPoint(x, y);
+    // 兜底按钮可能主动覆盖网站控件；移入或点击时仍绑定已选中的图片。
+    if (fallbackPosition && currentImg && host?.style.display === 'block' && els.includes(host)) {
+      const rect = host.getBoundingClientRect();
+      if (x >= rect.left && x < rect.right && y >= rect.top && y < rect.bottom &&
+          fallbackPointAllows(x, y, currentImg, true, els)) return currentImg;
+    }
     const foreground = [];
     for (const el of els) {
       if (el === host) continue;
@@ -489,10 +579,34 @@
         if (!src) continue;
         const r = el.getBoundingClientRect();
         if (r.width >= MIN_SIZE && r.height >= MIN_SIZE && isRenderedImage(el)) {
-          return foreground.some((item) => isImageObstruction(item, el) || isPageControl(item, el)) ? null : el;
+          const blocked = foreground.some((item) => isImageObstruction(item, el) || isPageControl(item, el));
+          return !blocked || fallbackPointAllows(x, y, el, false, els) ? el : null;
         }
       }
       foreground.push(el);
+    }
+    // 部分网站让可见 IMG 不接收鼠标，仅卡片/操作层参与命中。
+    // 从命中的局部容器补选唯一图片，不扫描整个文档或猜测被隐藏的轮播图。
+    for (const scope of els) {
+      if (scope === host || scope === document.body || scope === document.documentElement) continue;
+      const scopeRect = scope.getBoundingClientRect();
+      if (scopeRect.width > window.innerWidth + 80 || scopeRect.height > window.innerHeight + 120) continue;
+      const images = scope.querySelectorAll('img');
+      if (images.length > 12) continue;
+      const candidates = [...images].filter((img) => {
+        if (!(img.currentSrc || img.src) || getComputedStyle(img).pointerEvents !== 'none' ||
+            !isRenderedImage(img)) return false;
+        const fullRect = img.getBoundingClientRect();
+        const rect = clippedRect(img);
+        return fullRect.width >= MIN_SIZE && fullRect.height >= MIN_SIZE &&
+          x >= rect.left && x < rect.right && y >= rect.top && y < rect.bottom;
+      });
+      if (candidates.length !== 1) continue;
+      const img = candidates[0];
+      const preceding = els.slice(0, els.findIndex((el) => el.contains(img)));
+      if (!preceding.some((el) => isImageObstruction(el, img) || isPageControl(el, img)) ||
+          fallbackPointAllows(x, y, img, false, els)) return img;
+      return null;
     }
     return null;
   }
@@ -578,8 +692,22 @@
             x: maxX === minX ? .5 : (placedX - minX) / (maxX - minX),
             y: maxY === minY ? .5 : (placedY - minY) / (maxY - minY)
           } : null;
+          fallbackPosition = false;
           return true;
         }
+      }
+      // 所有识别/避让候选都失败时，在当前图片可见区域右上角最高层显示。
+      // 仅越过同图卡片内的图层/控件，不越过独立弹窗、框架或跨卡片遮罩。
+      if ([maxX + CONTROL_GAP, maxX + FAB_SIZE / 2, maxX + FAB_SIZE - CONTROL_GAP].every((x) =>
+          [minY + CONTROL_GAP, minY + FAB_SIZE / 2, minY + FAB_SIZE - CONTROL_GAP].every((y) =>
+            fallbackPointAllows(x, y, img, true)))) {
+        host.style.left = maxX + 'px';
+        host.style.top = minY + 'px';
+        currentCorner = 0;
+        cornerInsetOffset = 0;
+        interiorPosition = null;
+        fallbackPosition = true;
+        return true;
       }
     } finally {
       btn.style.pointerEvents = previousPointerEvents;
@@ -609,6 +737,7 @@
     currentCorner = -1;
     cornerInsetOffset = 0;
     interiorPosition = null;
+    fallbackPosition = false;
   }
 
   function renderFab(img) {
