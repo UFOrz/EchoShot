@@ -20,6 +20,7 @@ import { masonryColumns, masonryLayout } from '../lib/masonry.js';
 import { explanationLabel, localizeDocument, resolveLanguage, t } from '../lib/i18n.js';
 import { buildModelAliasIndex, loadSettings, recordModelDisplayName } from '../lib/settings.js';
 import { blobFromDataUrl, normalizeImageBlob } from '../lib/api.js';
+import { imageAspectInfo } from '../lib/generation-results.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -340,9 +341,12 @@ function createAlbumCard(rec) {
 
   const tag = document.createElement('div');
   tag.className = 'ratio-tag';
+  const aspect = imageAspectInfo(rec);
+  const ratioText = aspect.mismatch ? ui('请求 {requested} · 实际 {actual}', aspect) : rec.ratio || '';
   tag.textContent = rec.kind === 'group-item'
-    ? t('组图 {index}/{count}', { index: rec.groupIndex, count: rec.groupCount }, currentLanguage)
-    : (rec.ratio || '');
+    ? t('组图 {index}/{count}', { index: rec.groupIndex, count: rec.groupCount }, currentLanguage) +
+      (aspect.mismatch ? ` · ${ratioText}` : '')
+    : ratioText;
 
   const foot = document.createElement('div');
   foot.className = 'foot';
@@ -553,7 +557,10 @@ function openLightbox(id) {
   els.lbSize.textContent = rec.width && rec.height
     ? t('{width} × {height} 像素', { width: rec.width, height: rec.height }, currentLanguage)
     : '-';
-  els.lbRatio.textContent = rec.ratio || '-';
+  const aspect = imageAspectInfo(rec);
+  els.lbRatio.textContent = aspect.mismatch
+    ? ui('请求 {requested} · 实际 {actual}', aspect)
+    : rec.ratio || '-';
   els.lbTime.textContent = fmtTime(rec.createdAt);
   els.lbSrcRow.hidden = !rec.srcUrl;
   if (rec.srcUrl) els.lbSrc.href = rec.srcUrl;

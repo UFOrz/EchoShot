@@ -21,6 +21,7 @@ import {
 import { grantPrivacyConsent, hasPrivacyConsent } from '../lib/privacy.js';
 import { explanationLabel, localizeDocument, localizeRuntimeError, resolveLanguage, t } from '../lib/i18n.js';
 import { blobFromDataUrl, normalizeImageBlob } from '../lib/api.js';
+import { imageAspectInfo } from '../lib/generation-results.js';
 
 const $ = (id) => document.getElementById(id);
 const MAX_CONCURRENT_GENERATION_JOBS = 4;
@@ -1739,11 +1740,12 @@ async function replaceCharacter() {
 
 function resultMetaText(rec) {
   const displayModel = recordModelDisplayName(buildModelAliasIndex(settings || { platforms: [] }), rec);
+  const aspect = imageAspectInfo(rec);
   return [
     rec.provider || '',
     displayModel || rec.model || '',
     rec.width && rec.height ? `${rec.width}×${rec.height}` : '',
-    rec.ratio || ''
+    aspect.mismatch ? ui('请求 {requested} · 实际 {actual}', aspect) : rec.ratio || ''
   ].filter(Boolean).join(' · ');
 }
 
@@ -2080,6 +2082,7 @@ async function renderGenerationJobsNow(jobs, { restore = false } = {}) {
       (Number(b.finishedAt || b.updatedAt || b.startedAt) || 0));
   let newestCard = null;
   let newestRecord = null;
+  let newMismatchRecord = null;
   for (const job of visibleCompleted) {
     const recordIds = Array.isArray(job.recordIds) && job.recordIds.length
       ? job.recordIds
@@ -2091,6 +2094,9 @@ async function renderGenerationJobsNow(jobs, { restore = false } = {}) {
       const previousResult = lastResult;
       const previousAlbumRecordId = lastAlbumRecordId;
       newestCard = appendResultCard(record, { persist: false }) || newestCard;
+      if (!restore && matching.includes(job) && imageAspectInfo(record).mismatch) {
+        newMismatchRecord = record;
+      }
       if (belongsToCurrentSource) newestRecord = record;
       else {
         // 旧任务仍可查看、下载，但不能成为新反推任务的相册关联。
@@ -2106,7 +2112,9 @@ async function renderGenerationJobsNow(jobs, { restore = false } = {}) {
       revealGeneratedResult(newestCard, newestCard.querySelector('.result-img'));
     }
     if (hasNewCompletion) {
-      showToast(ui(restore ? '后台生成任务已完成，结果已保存到相册' : '生成完成，已保存到相册'));
+      showToast(newMismatchRecord
+        ? ui('图片已保存，但平台返回 {actual}（请求 {requested}）', imageAspectInfo(newMismatchRecord))
+        : ui(restore ? '后台生成任务已完成，结果已保存到相册' : '生成完成，已保存到相册'));
     }
   }
 
