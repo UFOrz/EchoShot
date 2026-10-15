@@ -27,6 +27,11 @@
 
   let host = null;
   let btn = null;
+  let fabModal = null;
+  const fabModalObserver = new MutationObserver(() => {
+    // 关闭后立即重开也需清除旧的顶层位置，下次悬停重新进入当前弹窗之上。
+    if (fabModal) hide();
+  });
   let currentImg = null;
   let hideTimer = 0;
   let showTimer = 0;
@@ -138,6 +143,12 @@
     const shadow = host.attachShadow({ mode: 'closed' });
     const style = document.createElement('style');
     style.textContent = `
+      :host([popover]) {
+        margin: 0 !important; padding: 0 !important; border: 0 !important;
+        right: auto !important; bottom: auto !important;
+        overflow: visible !important; background: transparent !important;
+      }
+      :host::backdrop { background: transparent; pointer-events: none; }
       .fab {
         pointer-events: auto;
         width: 30px; height: 30px;
@@ -180,6 +191,36 @@
 
     shadow.append(style, btn);
     (document.documentElement || document.body).appendChild(host);
+  }
+
+  function setFabVisible(visible) {
+    if (!host) return;
+    if (!visible && host.matches(':popover-open')) host.hidePopover();
+    host.style.display = visible ? 'block' : 'none';
+    if (visible && fabModal && !host.matches(':popover-open')) {
+      try { host.showPopover(); }
+      catch { host.style.display = 'none'; } // 弹窗可能已被网页同步移除。
+    }
+  }
+
+  function syncFabLayer(img) {
+    const modal = img.closest('dialog[open]:modal');
+    if (modal !== fabModal) {
+      setFabVisible(false);
+      fabModalObserver.disconnect();
+      fabModal = modal;
+      if (modal) fabModalObserver.observe(modal, { attributes: true, attributeFilter: ['open'] });
+    }
+    const parent = modal || document.documentElement || document.body;
+    if (host.parentElement !== parent) {
+      setFabVisible(false);
+      pointerOnFab = false;
+      parent.appendChild(host);
+    }
+    // 挂在当前弹窗内以保持可交互；用手动 popover 保持视口坐标，
+    // 避免弹窗自身的 transform / overflow 使按钮偏移或被裁切。
+    if (modal && host.getAttribute('popover') !== 'manual') host.setAttribute('popover', 'manual');
+    else if (!modal) host.removeAttribute('popover');
   }
 
   function isPageControl(el, img) {
@@ -473,6 +514,8 @@
   function clippedRect(el, viewport = true) {
     const rect = el.getBoundingClientRect();
     let { left, top, right, bottom } = rect;
+    // 顶层原生弹窗不受外部祖先的 overflow 裁切，嵌套弹窗同样如此。
+    const modalParent = el.closest('dialog[open]:modal')?.parentElement;
     if (viewport) {
       left = Math.max(left, 0);
       top = Math.max(top, 0);
@@ -480,6 +523,7 @@
       bottom = Math.min(bottom, window.innerHeight);
     }
     for (let parent = el.parentElement; parent && parent !== document.documentElement; parent = parent.parentElement) {
+      if (parent === modalParent) break;
       const style = getComputedStyle(parent);
       const containPaint = /\b(paint|content|strict)\b/.test(style.contain);
       const clipX = containPaint || /^(hidden|clip|scroll|auto)$/.test(style.overflowX);
@@ -743,7 +787,8 @@
   function renderFab(img) {
     if (!runtimeIsCurrent() || !img.isConnected || !magicButtonVisible || regionCaptureBusy) return;
     ensureFab();
-    host.style.display = positionFab(img) ? 'block' : 'none';
+    syncFabLayer(img);
+    setFabVisible(positionFab(img));
     clearHideTimer();
   }
 
@@ -758,7 +803,7 @@
     cancelPendingShow();
     currentImg = null;
     pointerOnFab = false;
-    if (host) host.style.display = 'none';
+    setFabVisible(false);
     resetPosition();
     pendingImg = img;
     showTimer = setTimeout(() => {
@@ -778,7 +823,7 @@
     currentImg = null;
     pointerOnFab = false;
     resetPosition();
-    if (host) host.style.display = 'none';
+    setFabVisible(false);
   }
 
   function scheduleHide() {
@@ -1126,8 +1171,7 @@
       hide();
       return;
     }
-    ensureFab();
-    host.style.display = positionFab(currentImg) ? 'block' : 'none';
+    renderFab(currentImg);
   }
 
   document.addEventListener('mousemove', onMouseMove, { passive: true, capture: true });
@@ -1138,6 +1182,8 @@
     contentRuntime.active = false;
     clearHideTimer();
     cancelPendingShow();
+    fabModalObserver.disconnect();
+    fabModal = null;
     if (rafId) cancelAnimationFrame(rafId);
     document.removeEventListener('mousemove', onMouseMove, true);
     window.removeEventListener('scroll', onScrollOrResize, true);
