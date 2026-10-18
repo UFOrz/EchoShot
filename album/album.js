@@ -188,6 +188,22 @@ function closeDeleteConfirmation(accepted) {
   confirmReturnFocus = null;
 }
 
+async function confirmRecordDeletion(ids, message) {
+  try {
+    // Read the latest backup state, including records outside the visible page.
+    // Backups may be disabled or may have completed since the page was opened.
+    const latest = await getRecordsByIds(ids);
+    const unprotected = latest.filter(rec => !rec.backedUpAt || rec.backupPending || rec.backupError);
+    const warning = unprotected.length
+      ? ui('其中 {count} 张图片尚未成功备份或备份失败，删除可能丢失唯一副本。仍要永久删除吗？', { count: unprotected.length })
+      : '';
+    return requestDeleteConfirmation(warning ? `${message}\n\n${warning}` : message);
+  } catch (error) {
+    showToast(ui('删除失败：{error}', { error: error?.message || String(error) }));
+    return false;
+  }
+}
+
 function fmtTime(ts) {
   const locale = { zh: 'zh-CN', en: 'en-US', ja: 'ja-JP', ko: 'ko-KR' }[currentLanguage];
   return new Date(ts).toLocaleString(locale, { hour12: false });
@@ -332,7 +348,6 @@ function createAlbumCard(rec) {
   check.className = 'check';
   check.textContent = '✓';
   check.title = t('选择', {}, currentLanguage);
-  check.setAttribute('aria-label', t('选择', {}, currentLanguage));
   check.setAttribute('aria-pressed', String(selected.has(rec.id)));
   check.addEventListener('click', (e) => {
     e.stopPropagation();
@@ -410,10 +425,14 @@ function renderGrid({ animate = false } = {}) {
   els.countTag.textContent = totalRecords ? t('共 {count} 张', { count: totalRecords }, currentLanguage) : '';
 
   let cursor = els.grid.firstElementChild;
-  for (const rec of filtered) {
+  for (const [index, rec] of filtered.entries()) {
     const card = oldCards.get(rec.id) || createAlbumCard(rec);
     card.classList.toggle('selected', selected.has(rec.id));
     card.querySelector('.check').setAttribute('aria-pressed', String(selected.has(rec.id)));
+    card.querySelector('.check').setAttribute('aria-label', ui('选择第 {index} 张图片：{prompt}', {
+      index: pageOffset + index + 1,
+      prompt: (rec.prompt || ui('(无提示词)')).slice(0, 120)
+    }));
     while (cursor?.classList.contains('is-removing')) cursor = cursor.nextElementSibling;
     if (card === cursor) cursor = cursor.nextElementSibling;
     else els.grid.insertBefore(card, cursor);
@@ -928,6 +947,8 @@ function startDownloadAll() {
 async function deleteRecords(ids) {
   const deletionPageSeq = pageLoadSeq;
   const deletionQuery = els.searchInput.value.trim();
+  const removedIds = new Set(ids);
+  const firstRemovedIndex = Math.max(0, records.findIndex(rec => removedIds.has(rec.id)));
   await removeMany(ids);
   for (const id of ids) {
     selected.delete(id);
@@ -936,7 +957,11 @@ async function deleteRecords(ids) {
   const total = await countAll(deletionQuery, { searchTermsForRecord });
   if (deletionPageSeq !== pageLoadSeq || deletionQuery !== els.searchInput.value.trim()) return;
   const lastPageOffset = Math.max(0, (Math.ceil(total / PAGE_SIZE) - 1) * PAGE_SIZE);
+  const reloadSeq = pageLoadSeq + 1;
   await loadPage(Math.min(pageOffset, lastPageOffset), '', { animateDeletion: true });
+  if (pageLoadSeq !== reloadSeq || deletionQuery !== els.searchInput.value.trim()) return;
+  const remaining = [...els.grid.querySelectorAll(':scope > .card:not(.is-removing) .thumb')];
+  (remaining[Math.min(firstRemovedIndex, remaining.length - 1)] || els.searchInput).focus({ preventScroll: true });
 }
 
 async function deleteRecordsWithFeedback(ids) {
@@ -995,8 +1020,9 @@ els.btnCancelDownload.addEventListener('click', () => {
 els.btnDeleteSel.addEventListener('click', async () => {
   const n = selected.size;
   if (!n) return;
-  if (!await requestDeleteConfirmation(ui('确定删除选中的 {count} 张图片吗？此操作不可恢复。', { count: n }))) return;
-  if (await deleteRecordsWithFeedback([...selected])) {
+  const ids = [...selected];
+  if (!await confirmRecordDeletion(ids, ui('确定删除选中的 {count} 张图片吗？此操作不可恢复。', { count: n }))) return;
+  if (await deleteRecordsWithFeedback(ids)) {
     showToast(ui('已删除 {count} 张图片', { count: n }));
   }
 });
@@ -1089,7 +1115,7 @@ els.lbDownload.addEventListener('click', () => {
 els.lbDelete.addEventListener('click', async () => {
   const rec = records.find((r) => r.id === currentLbId);
   if (!rec) return;
-  if (!await requestDeleteConfirmation(t('确定删除这张图片吗？此操作不可恢复。', {}, currentLanguage))) return;
+  if (!await confirmRecordDeletion([rec.id], ui('确定删除这张图片吗？此操作不可恢复。'))) return;
   closeLightbox();
   if (await deleteRecordsWithFeedback([rec.id])) {
     showToast(t('已删除', {}, currentLanguage));
@@ -1234,12 +1260,24 @@ chrome.storage.local.onChanged.addListener((changes) => {
   });
 });
 
-window.addEventListener('pagehide', () => {
+let restoreAfterPageShow = false;
+window.addEventListener('pagehide', (event) => {
+  restoreAfterPageShow = event.persisted;
   topbarObserver.disconnect();
   for (const animation of cardAnimations.values()) animation.cancel();
   if (masonryLayoutFrame) cancelAnimationFrame(masonryLayoutFrame);
+  masonryLayoutFrame = 0;
   clearTimeout(searchTimer);
   clearTimeout(downloadProgressTimer);
   downloadController?.abort();
   revokePageUrls();
+});
+
+window.addEventListener('pageshow', (event) => {
+  if (!event.persisted || !restoreAfterPageShow) return;
+  restoreAfterPageShow = false;
+  topbarObserver.observe(topbar);
+  // Object URLs were revoked on pagehide. Reload persisted records to rebuild
+  // thumbnails and comparison URLs when navigating back from the page cache.
+  void loadPageSafely(pageOffset);
 });

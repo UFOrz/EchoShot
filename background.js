@@ -1,6 +1,6 @@
 // 后台 Service Worker：消息路由、来源图片抓取、反推与生图调用、侧边栏/相册打开
 
-import { apiBaseUrlError, imageEditReferenceLimit, isAtlasCloudNanoBananaEditModel, isModelScopeImageEditModel, loadSettings, providerLabel, requiresSourceImage, resolveModelConfig } from './lib/settings.js';
+import { allowsEmptyApiKey, apiBaseUrlError, imageEditReferenceLimit, isAtlasCloudNanoBananaEditModel, isModelScopeImageEditModel, loadSettings, providerLabel, requiresSourceImage, resolveModelConfig, supportsImageEdit } from './lib/settings.js';
 import {
   normalizeImageBlob,
   blobFromDataUrl,
@@ -41,6 +41,8 @@ import { promptFromImageGenerationMetadata, readImageGenerationMetadata } from '
 import { interruptedSessionPatch, normalizedWindowId, recoverInterruptedGenerationJobs, scopedSessionKey, sourceKey } from './lib/task-state.js';
 import { resolveLanguage, t } from './lib/i18n.js';
 import { generatedImages } from './lib/generation-results.js';
+import { normalizeImageMime } from './lib/image-file.js';
+import { collectSourceBlobIds, deleteSourceBlob, getSourceBlob as getCachedSourceBlob, hydrateSource, pruneSourceBlobs, sourceMetadata, storeSource } from './lib/source-store.js';
 
 const MENU_IMAGE = 'ir-image';
 const MENU_ALBUM = 'ir-album';
@@ -51,10 +53,12 @@ const GENERATION_JOB_HISTORY_LIMIT = 20;
 const MAX_CONCURRENT_GENERATION_JOBS = 4;
 const MAX_WEB_SOURCE_IMAGE_BYTES = 128 * 1024 * 1024;
 const activeSourceRequestIds = new Map();
+const sourceWriteQueues = new Map();
+const closedWindowIds = new Set();
 const runningJobs = new Map();
 const generationJobQueues = new Map();
 let surpriseHistoryQueue = Promise.resolve();
-const startupRecovery = recoverInterruptedJobs().catch(() => {});
+const startupRecovery = recoverInterruptedJobs().then(() => pruneSourceCache({ graceMs: 0 })).catch(() => {});
 void startupRecovery.then(() => resumePendingBackups()).catch(() => {});
 void navigator.storage?.persist?.().catch(() => false);
 
@@ -74,6 +78,7 @@ async function getWindowSession(kind, windowId) {
 }
 
 async function setWindowSession(kind, windowId, value) {
+  if (closedWindowIds.has(windowId)) return;
   const key = scopedSessionKey(kind, windowId);
   if (!key) throw new Error('无法确定当前浏览器窗口');
   await chrome.storage.session.set({ [key]: value });
@@ -92,6 +97,81 @@ async function setWindowSourceAndTask(windowId, source, task) {
   await chrome.storage.session.set({
     [sourceStorageKey]: source,
     [taskStorageKey]: task
+  });
+}
+
+// 来源与惊喜任务共用写入队列，让迟到的网页抓取/提示词请求不能覆盖新选择。
+function withSourceLock(windowId, operation) {
+  const previous = sourceWriteQueues.get(windowId) || Promise.resolve();
+  const next = previous.then(operation, operation);
+  sourceWriteQueues.set(windowId, next.catch(() => {}));
+  return next;
+}
+
+async function pruneSourceCache(options) {
+  const values = await chrome.storage.session.get(null);
+  const referenced = [];
+  for (const [key, value] of Object.entries(values)) {
+    if (/\.pendingSource$/.test(key)) referenced.push(value);
+    else if (/\.generationJobs$/.test(key)) referenced.push((value || []).filter(job => job?.status === 'running'));
+    else if (/\.(?:job|reverseJob)$/.test(key) && value?.status === 'running') referenced.push(value);
+  }
+  referenced.push(...runningJobs.values());
+  return pruneSourceBlobs(collectSourceBlobIds(referenced), options);
+}
+
+function commitSource(windowId, source, { task, initial = false } = {}) {
+  return withSourceLock(windowId, async () => {
+    if (closedWindowIds.has(windowId)) return false;
+    const previousSource = initial ? await getWindowSession('pendingSource', windowId) : null;
+    if (!initial) {
+      const current = await getWindowSession('pendingSource', windowId);
+      if (current?.requestId !== source.requestId) return false;
+      if (!activeSourceRequestIds.has(windowId)) activeSourceRequestIds.set(windowId, source.requestId);
+    }
+    if (activeSourceRequestIds.get(windowId) !== source.requestId) return false;
+    let stored;
+    try {
+      stored = source.status === 'ready' ? await storeSource(source, { windowId }) : sourceMetadata(source);
+      if (activeSourceRequestIds.get(windowId) !== source.requestId) {
+        if (stored.sourceBlobId && stored.sourceBlobId !== source.sourceBlobId) await deleteSourceBlob(stored.sourceBlobId);
+        return false;
+      }
+      // 像素先存入独立缓存；session 中只原子提交来源引用与匹配草稿。
+      await chrome.storage.session.set({
+        [scopedSessionKey('pendingSource', windowId)]: stored,
+        ...(initial || task ? { [scopedSessionKey('panelTask', windowId)]: task || null } : {}),
+        ...(initial ? { [scopedSessionKey('surpriseTask', windowId)]: null } : {})
+      });
+      if (stored.sourceBlobId) source.sourceBlobId = stored.sourceBlobId;
+      void pruneSourceCache().catch(() => {});
+      return activeSourceRequestIds.get(windowId) === source.requestId;
+    } catch (error) {
+      if (stored?.sourceBlobId && stored.sourceBlobId !== source.sourceBlobId) {
+        await deleteSourceBlob(stored.sourceBlobId).catch(() => {});
+      }
+      if (initial && activeSourceRequestIds.get(windowId) === source.requestId) {
+        if (previousSource?.requestId) activeSourceRequestIds.set(windowId, previousSource.requestId);
+        else activeSourceRequestIds.delete(windowId);
+      }
+      if (error?.code === 'SOURCE_ASSET_MISSING') throw error;
+      const failure = new Error('来源图片保存失败，请重试');
+      failure.code = 'SOURCE_STORAGE_ERROR';
+      throw failure;
+    }
+  });
+}
+
+function commitSurpriseTask(windowId, task, { activate = false } = {}) {
+  return withSourceLock(windowId, async () => {
+    if (!activate) {
+      const current = await getWindowSession('surpriseTask', windowId);
+      if (current?.sourceRequestId !== task.sourceRequestId) return false;
+    }
+    const activeId = activeSourceRequestIds.get(windowId);
+    if (activeId && activeId !== task.sourceRequestId) return false;
+    await setWindowSession('surpriseTask', windowId, task);
+    return true;
   });
 }
 
@@ -226,11 +306,12 @@ async function broadcastLanguage() {
 }
 
 chrome.windows?.onRemoved?.addListener((windowId) => {
+  closedWindowIds.add(windowId);
   activeSourceRequestIds.delete(windowId);
-  const keys = ['pendingSource', 'panelTask', 'surpriseTask', 'surpriseJob', 'albumAction', 'captureFeedback', 'job', 'reverseJob']
+  const keys = ['pendingSource', 'panelTask', 'surpriseTask', 'surpriseJob', 'albumAction', 'captureFeedback', 'job', 'reverseJob', 'generationJobs']
     .map((kind) => scopedSessionKey(kind, windowId))
     .filter(Boolean);
-  if (keys.length) void chrome.storage.session.remove(keys).catch(() => {});
+  if (keys.length) void chrome.storage.session.remove(keys).then(() => pruneSourceCache()).catch(() => {});
 });
 
 function setupActionBehavior() {
@@ -299,6 +380,34 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     switch (msg?.type) {
       case 'ir.getPending':
         return { ok: true, source: await getPending(windowId) };
+      case 'ir.setSource': {
+        const source = msg.payload?.source;
+        if (windowId == null || !source?.requestId) throw new Error('来源图片无效');
+        if (closedWindowIds.has(windowId)) return { ok: false, code: 'WINDOW_CLOSED', error: '原窗口已关闭，请重新打开侧边栏' };
+        if (!msg.payload?.expectedRequestId) activeSourceRequestIds.set(windowId, source.requestId);
+        else if (msg.payload.expectedRequestId !== source.requestId) return { ok: false, stale: true };
+        const committed = await commitSource(windowId, source, {
+          task: msg.payload.task,
+          initial: !msg.payload.expectedRequestId
+        });
+        return { ok: committed, stale: !committed, ...(committed ? { source: sourceMetadata(source) } : {}) };
+      }
+      case 'ir.setSurpriseTask': {
+        const task = msg.payload?.task;
+        if (windowId == null || !task?.sourceRequestId) throw new Error('任务无效');
+        if (closedWindowIds.has(windowId)) return { ok: false, code: 'WINDOW_CLOSED', error: '原窗口已关闭，请重新打开侧边栏' };
+        if (msg.payload.activate) activeSourceRequestIds.set(windowId, task.sourceRequestId);
+        const committed = await commitSurpriseTask(windowId, task, { activate: Boolean(msg.payload.activate) });
+        return { ok: committed, stale: !committed };
+      }
+      case 'ir.dismissSurpriseTask':
+        return await withSourceLock(windowId, async () => {
+          const current = await getWindowSession('surpriseTask', windowId);
+          if (current?.sourceRequestId === msg.payload?.sourceRequestId) {
+            await removeWindowSession('surpriseTask', windowId);
+          }
+          return { ok: true };
+        });
       case 'ir.reverse':
         return await doReverse({ ...msg.payload, windowId });
       case 'ir.job.reverse':
@@ -334,6 +443,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           (update, control) => generateAndSave({ ...msg.payload, windowId }, update, control),
           {
             id: msg.payload?.clientJobId,
+            sourceBlobId: msg.payload?.sourceSnapshot?.sourceBlobId || '',
             sourceKey: msg.payload?.sourceSnapshot?.requestId || msg.payload?.sourceSnapshot?.ts || msg.payload?.sourceKey || null,
             label: 'generate'
           }
@@ -348,6 +458,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           (update, control) => editAndSave({ ...msg.payload, windowId }, update, control),
           {
             id: msg.payload?.clientJobId,
+            sourceBlobId: msg.payload?.sourceSnapshot?.sourceBlobId || '',
             sourceKey: msg.payload?.sourceSnapshot?.requestId || msg.payload?.sourceSnapshot?.ts || null,
             label: 'replacement'
           }
@@ -357,10 +468,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           'group',
           windowId,
           (update, control) => generateGroupAndSave({ ...msg.payload, windowId }, update, control),
-          { sourceKey: msg.payload?.sourceSnapshot?.requestId || msg.payload?.sourceSnapshot?.ts || null, label: 'group' }
+          { sourceKey: msg.payload?.sourceSnapshot?.requestId || msg.payload?.sourceSnapshot?.ts || null,
+            sourceBlobId: msg.payload?.sourceSnapshot?.sourceBlobId || '', label: 'group' }
         );
       case 'ir.job.cancel':
         return await cancelWindowJob(windowId);
+      case 'ir.generation.cancel':
+        return await cancelGenerationJob(windowId, msg.payload?.jobId);
       case 'ir.getJob':
         return { ok: true, job: await getWindowSession('job', windowId) };
       case 'ir.getGenerationJobs':
@@ -434,14 +548,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     }
   })()
     .then((r) => sendResponse(r ?? { ok: true }))
-    .catch((e) => sendResponse({ ok: false, error: errText(e) }));
+    .catch((e) => sendResponse({ ok: false, error: errText(e), ...(e?.code ? { code: e.code } : {}) }));
   return true; // 异步响应
 });
 
 // ---------- 来源图片处理 ----------
 
 async function getPending(windowId) {
-  return getWindowSession('pendingSource', windowId);
+  return hydrateSource(await getWindowSession('pendingSource', windowId));
 }
 
 async function recordCaptureFailure(error, windowId) {
@@ -498,10 +612,10 @@ async function fetchOriginalSourceBlob(src, timeoutMs = 10000) {
         throw new Error('网页原图超过 128 MiB，改用页面像素捕获');
       }
     }
-    if (!/^image\//i.test(blob.type || '')) {
+    if (!/^image\//i.test(blob.type || '') && !/^(?:application\/octet-stream)?$/i.test(blob.type || '')) {
       throw new Error('目标不是图片（' + (blob.type || '未知类型') + '），可能被站点防盗链保护');
     }
-    return blob;
+    return normalizeImageMime(blob);
   } finally {
     clearTimeout(timeout);
   }
@@ -516,6 +630,7 @@ async function handleSource(payload, windowId, panelOpenPromise = null) {
   if (!payload?.src) return;
   windowId = normalizedWindowId(windowId);
   if (windowId == null) throw new Error('无法确定来源图片所在窗口');
+  if (closedWindowIds.has(windowId)) return;
 
   const requestId = crypto.randomUUID();
   activeSourceRequestIds.set(windowId, requestId);
@@ -550,18 +665,14 @@ async function handleSource(payload, windowId, panelOpenPromise = null) {
     status: 'loading',
     needsReverse: true
   };
-  await Promise.all([
-    setWindowSession('pendingSource', windowId, pending),
-    removeWindowSession('panelTask', windowId),
-    removeWindowSession('surpriseTask', windowId)
-  ]);
+  if (!await commitSource(windowId, pending, { initial: true })) return;
   if (activeSourceRequestIds.get(windowId) !== requestId) return;
 
   try {
     if (payload.alreadyNormalized && payload.dataUrl) {
       const { previewUrl: _previewUrl, ...settledSource } = pending;
       await Promise.all([
-        setWindowSession('pendingSource', windowId, {
+        commitSource(windowId, {
           ...settledSource,
           status: 'ready',
           dataUrl: payload.dataUrl,
@@ -629,7 +740,7 @@ async function handleSource(payload, windowId, panelOpenPromise = null) {
       mime: norm.mime
     };
     if (prompt) {
-      await setWindowSourceAndTask(windowId, readySource, {
+      await commitSource(windowId, readySource, { task: {
         sourceRequestId: requestId,
         sourceTs: pending.ts,
         prompt,
@@ -640,14 +751,14 @@ async function handleSource(payload, windowId, panelOpenPromise = null) {
         metadataRead: true,
         metadataSource,
         updatedAt: Date.now()
-      });
+      } });
     } else {
-      await setWindowSession('pendingSource', windowId, readySource);
+      await commitSource(windowId, readySource);
     }
   } catch (e) {
     if (activeSourceRequestIds.get(windowId) !== requestId) return;
     const { previewUrl: _previewUrl, ...settledSource } = pending;
-    await setWindowSession('pendingSource', windowId, {
+    await commitSource(windowId, {
       ...settledSource,
       status: 'error',
       error: errText(e)
@@ -775,14 +886,15 @@ async function doReverse({ sourceRequestId, sourceTs, selection, windowId } = {}
   const cfg = resolveModelConfig(s, 'vision', selection);
   const baseUrlError = apiBaseUrlError(cfg.baseUrl);
   if (baseUrlError) return { ok: false, error: baseUrlError };
-  if (!cfg.apiKey) {
+  if (!cfg.apiKey && !allowsEmptyApiKey(cfg)) {
     return { ok: false, error: '尚未配置反推模型 API Key，请前往设置页填写' };
   }
   if (!cfg.baseUrl || !cfg.model) {
     return { ok: false, error: '反推模型的 Base URL / 模型名未配置完整' };
   }
   // 识图请求使用较小副本控制消息体；相同来源的 2048px 副本仍保留给图生图。
-  const visionBlob = await blobFromDataUrl(source.dataUrl);
+  const visionBlob = source.sourceBlobId
+    ? await getCachedSourceBlob(source.sourceBlobId) : await blobFromDataUrl(source.dataUrl);
   const visionInput = await normalizeImageBlob(visionBlob, 1024);
   const r = await reversePromptFromImage({ cfg, dataUrl: visionInput.dataUrl, language });
   const current = await getPending(windowId);
@@ -810,7 +922,7 @@ async function doSurprise({ selection, sourceRequestId, sourceTs, ratio, windowI
   const cfg = resolveModelConfig(s, 'vision', selection);
   const baseUrlError = apiBaseUrlError(cfg.baseUrl);
   if (baseUrlError) return { ok: false, error: baseUrlError };
-  if (!cfg.apiKey) {
+  if (!cfg.apiKey && !allowsEmptyApiKey(cfg)) {
     return { ok: false, error: '尚未配置反推模型 API Key，请前往设置页填写' };
   }
   if (!cfg.baseUrl || !cfg.model) {
@@ -850,9 +962,10 @@ async function doGenerate({ prompt, ratio, selection, sourceRequestId, sourceTs,
   }
   const s = await loadSettings();
   const cfg = resolveModelConfig(s, 'image', selection);
+  if (control?.signal) cfg.signal = control.signal;
   const baseUrlError = apiBaseUrlError(cfg.baseUrl);
   if (baseUrlError) return { ok: false, error: baseUrlError };
-  if (!cfg.apiKey) {
+  if (!cfg.apiKey && !allowsEmptyApiKey(cfg)) {
     return { ok: false, error: '尚未配置生图模型 API Key，请前往设置页填写' };
   }
   if (!cfg.baseUrl || !cfg.model) {
@@ -955,7 +1068,7 @@ async function doEdit({ prompt, ratio, selection, sourceDataUrl, referenceDataUr
   const cfg = resolveModelConfig(s, 'image', selection);
   const error = apiBaseUrlError(cfg.baseUrl);
   if (error) return { ok: false, error };
-  if (!cfg.apiKey || !cfg.model) return { ok: false, error: '图生图模型配置不完整' };
+  if ((!cfg.apiKey && !allowsEmptyApiKey(cfg)) || !cfg.model) return { ok: false, error: '图生图模型配置不完整' };
   const size = s.sizeMap?.[ratio] || s.sizeMap?.['1:1'] || '1024x1024';
   const quality = s.imageQuality || 'low';
   const resolution = s.imageResolution || '1k';
@@ -1040,8 +1153,11 @@ async function doEdit({ prompt, ratio, selection, sourceDataUrl, referenceDataUr
       resolution
     });
   } else if (cfg.apiType === 'runninghub-v2') {
-    if (!runningHubNeedsSource(cfg.model, cfg.imageCapabilities)) {
+    if (!supportsImageEdit(cfg)) {
       return { ok: false, error: '请选择 RunningHUB 的 image-to-image 或 edit 模型' };
+    }
+    if (imageEditReferenceLimit(cfg) < [sourceDataUrl, referenceDataUrl].filter(Boolean).length) {
+      return { ok: false, error: '该 RunningHUB 模型不支持双图参考，请选择支持至少两张图片的模型' };
     }
     r = await generateRunningHubImage({ cfg, prompt: prompt.trim(), ratio, size, sourceDataUrl, referenceDataUrl, resolution });
   } else if (cfg.apiType === 'runninghub-workflow-v2') {
@@ -1112,7 +1228,10 @@ async function saveGeneratedRecord(resp, {
   if (!/^image\//i.test(blob.type || '')) throw new Error('生成接口返回的不是有效图片');
 
   let sourceBlob = null;
-  if (source?.dataUrl) {
+  if (source?.sourceBlobId) {
+    sourceBlob = await getCachedSourceBlob(source.sourceBlobId);
+    if (!sourceBlob) throw new Error('来源图片已失效，请重新选择图片');
+  } else if (source?.dataUrl) {
     const sourceResponse = await fetch(source.dataUrl);
     if (sourceResponse.ok) sourceBlob = await sourceResponse.blob();
   }
@@ -1132,7 +1251,7 @@ async function saveGeneratedRecord(resp, {
     height: resp.height,
     ratio: resp.ratio,
     size: resp.size,
-    srcUrl: source?.src || '',
+    srcUrl: /^https?:\/\//i.test(String(source?.src || '')) ? source.src : '',
     pageUrl: source?.pageUrl || '',
     blob,
     ...albumMeta
@@ -1145,6 +1264,7 @@ async function runWindowJob(type, windowId, executor, initial = {}, {
   allowSupersede = false
 } = {}) {
   if (windowId == null) return { ok: false, error: '无法确定当前浏览器窗口' };
+  if (closedWindowIds.has(windowId)) return { ok: false, code: 'WINDOW_CLOSED', error: '原窗口已关闭，请重新打开侧边栏' };
   const registryKey = `${sessionKind}:${windowId}`;
   if (runningJobs.has(registryKey) && !allowSupersede) {
     return { ok: false, error: '当前窗口已有后台任务进行中，请等待完成' };
@@ -1177,7 +1297,7 @@ async function runWindowJob(type, windowId, executor, initial = {}, {
     throw error;
   };
   const update = async (patch = {}) => {
-    state = { ...state, ...patch, id: jobId, type, updatedAt: Date.now() };
+    state = { ...state, ...patch, cancelRequested: state.cancelRequested || isCancelled(), id: jobId, type, updatedAt: Date.now() };
     if (!isCurrent()) return false;
     const snapshot = { ...state };
     const write = stateWriteChain.then(async () => {
@@ -1188,7 +1308,7 @@ async function runWindowJob(type, windowId, executor, initial = {}, {
     stateWriteChain = write.catch(() => {});
     return write;
   };
-  runningJobs.set(registryKey, { id: jobId, type, cancelRequested: false });
+  runningJobs.set(registryKey, { id: jobId, type, cancelRequested: false, sourceBlobId: initial.sourceBlobId || '', update });
   let heartbeatTimer = 0;
   try {
     await update();
@@ -1228,11 +1348,12 @@ async function runWindowJob(type, windowId, executor, initial = {}, {
         lastRecordId: state.lastRecordId || ''
       };
     }
-    await update({ status: 'failed', finishedAt: Date.now(), error: errText(error) });
+    await update({ status: 'failed', finishedAt: Date.now(), error: errText(error), code: error?.code || '' });
     return {
       ok: false,
       jobId,
       error: errText(error),
+      ...(error?.code ? { code: error.code } : {}),
       recordIds: state.recordIds || [],
       lastRecordId: state.lastRecordId || ''
     };
@@ -1240,11 +1361,13 @@ async function runWindowJob(type, windowId, executor, initial = {}, {
     if (heartbeatTimer) clearInterval(heartbeatTimer);
     await stateWriteChain;
     if (isCurrent()) runningJobs.delete(registryKey);
+    void pruneSourceCache().catch(() => {});
   }
 }
 
 async function runWindowGenerationJob(type, windowId, executor, initial = {}) {
   if (windowId == null) return { ok: false, error: '无法确定当前浏览器窗口' };
+  if (closedWindowIds.has(windowId)) return { ok: false, code: 'WINDOW_CLOSED', error: '原窗口已关闭，请重新打开侧边栏' };
   if (runningJobs.has(`job:${windowId}`)) {
     return { ok: false, error: '当前正在执行组图或替换任务，请等待完成' };
   }
@@ -1270,8 +1393,10 @@ async function runWindowGenerationJob(type, windowId, executor, initial = {}) {
   };
   let stateWriteChain = Promise.resolve();
   const isCurrent = () => runningJobs.get(registryKey)?.id === jobId;
+  const controller = new AbortController();
+  const isCancelled = () => runningJobs.get(registryKey)?.cancelRequested === true;
   const update = async (patch = {}) => {
-    state = { ...state, ...patch, id: jobId, type, updatedAt: Date.now() };
+    state = { ...state, ...patch, cancelRequested: state.cancelRequested || isCancelled(), id: jobId, type, updatedAt: Date.now() };
     if (!isCurrent()) return false;
     const snapshot = { ...state };
     const write = stateWriteChain.then(async () => {
@@ -1283,10 +1408,16 @@ async function runWindowGenerationJob(type, windowId, executor, initial = {}) {
     return write;
   };
   const control = {
-    isCancelled: () => false,
-    checkpoint: () => {}
+    signal: controller.signal,
+    isCancelled,
+    checkpoint: () => {
+      if (!isCancelled()) return;
+      const error = new Error('任务已停止');
+      error.code = 'JOB_CANCELLED';
+      throw error;
+    }
   };
-  runningJobs.set(registryKey, { id: jobId, type, cancelRequested: false });
+  runningJobs.set(registryKey, { id: jobId, type, cancelRequested: false, controller, sourceBlobId: initial.sourceBlobId || '', update });
   let heartbeatTimer = 0;
   try {
     await update();
@@ -1296,20 +1427,25 @@ async function runWindowGenerationJob(type, windowId, executor, initial = {}) {
     }, JOB_HEARTBEAT_INTERVAL_MS);
     const result = await executor(update, control);
     await update({
-      status: 'completed',
+      status: isCancelled() ? 'cancelled' : 'completed',
       finishedAt: Date.now(),
       completed: Array.isArray(result.recordIds) ? result.recordIds.length : 1,
       total: result.total ?? 1,
       recordIds: result.recordIds || state.recordIds,
       lastRecordId: result.lastRecordId || result.albumRecordId || state.lastRecordId || ''
     });
-    return { ok: true, jobId, ...result };
+    return { ok: true, jobId, ...result, cancelled: isCancelled() };
   } catch (error) {
-    await update({ status: 'failed', finishedAt: Date.now(), error: errText(error) });
+    if (isCancelled() || error?.code === 'JOB_CANCELLED') {
+      await update({ status: 'cancelled', finishedAt: Date.now(), stage: '任务已停止' });
+      return { ok: true, cancelled: true, jobId, recordIds: state.recordIds || [], lastRecordId: state.lastRecordId || '' };
+    }
+    await update({ status: 'failed', finishedAt: Date.now(), error: errText(error), code: error?.code || '' });
     return {
       ok: false,
       jobId,
       error: errText(error),
+      ...(error?.code ? { code: error.code } : {}),
       recordIds: state.recordIds || [],
       lastRecordId: state.lastRecordId || ''
     };
@@ -1317,7 +1453,18 @@ async function runWindowGenerationJob(type, windowId, executor, initial = {}) {
     if (heartbeatTimer) clearInterval(heartbeatTimer);
     await stateWriteChain;
     if (isCurrent()) runningJobs.delete(registryKey);
+    void pruneSourceCache().catch(() => {});
   }
+}
+
+async function cancelGenerationJob(windowId, jobId) {
+  const registryKey = `generation:${windowId}:${String(jobId || '')}`;
+  const active = runningJobs.get(registryKey);
+  if (!active) return { ok: false, error: '当前没有可停止的生图任务' };
+  active.cancelRequested = true;
+  active.controller.abort(new DOMException('任务已停止', 'AbortError'));
+  await active.update({ cancelRequested: true, stage: '正在停止任务' });
+  return { ok: true, requested: true };
 }
 
 async function cancelWindowJob(windowId) {
@@ -1325,34 +1472,32 @@ async function cancelWindowJob(windowId) {
   const registryKey = `job:${windowId}`;
   const active = runningJobs.get(registryKey);
   if (!active) return { ok: false, error: '当前没有可停止的任务' };
-  runningJobs.set(registryKey, { ...active, cancelRequested: true });
-  const state = await getWindowSession('job', windowId);
-  if (state?.status === 'running') {
-    await setWindowSession('job', windowId, {
-      ...state,
-      cancelRequested: true,
-      stage: '正在停止任务',
-      updatedAt: Date.now()
-    });
-  }
+  active.cancelRequested = true;
+  await active.update({ cancelRequested: true, stage: '正在停止任务' });
   return { ok: true, requested: true };
 }
 
 async function persistReversePanelTask(windowId, resp) {
-  const existing = await getWindowSession('panelTask', windowId);
-  const sameSource = Boolean(existing) && (
-    (resp.sourceRequestId && existing.sourceRequestId === resp.sourceRequestId) ||
-    (!resp.sourceRequestId && existing.sourceTs === resp.sourceTs)
-  );
-  await setWindowSession('panelTask', windowId, {
-    ...(sameSource ? existing : {}),
-    sourceRequestId: resp.sourceRequestId || '',
-    sourceTs: resp.sourceTs,
-    prompt: resp.promptEn || '',
-    sourcePrompt: resp.promptEn || '',
-    promptZh: resp.promptZh || '',
-    explanationLanguage: resp.explanationLanguage || '',
-    updatedAt: Date.now()
+  return withSourceLock(windowId, async () => {
+    const current = await getWindowSession('pendingSource', windowId);
+    const expectedKey = resp.sourceRequestId || resp.sourceTs || null;
+    const activeId = activeSourceRequestIds.get(windowId);
+    if (sourceKey(current) !== expectedKey || (activeId && activeId !== expectedKey)) return;
+    const existing = await getWindowSession('panelTask', windowId);
+    const sameSource = Boolean(existing) && (
+      (resp.sourceRequestId && existing.sourceRequestId === resp.sourceRequestId) ||
+      (!resp.sourceRequestId && existing.sourceTs === resp.sourceTs)
+    );
+    await setWindowSession('panelTask', windowId, {
+      ...(sameSource ? existing : {}),
+      sourceRequestId: resp.sourceRequestId || '',
+      sourceTs: resp.sourceTs,
+      prompt: resp.promptEn || '',
+      sourcePrompt: resp.promptEn || '',
+      promptZh: resp.promptZh || '',
+      explanationLanguage: resp.explanationLanguage || '',
+      updatedAt: Date.now()
+    });
   });
 }
 
@@ -1385,7 +1530,11 @@ async function surpriseAndPersist(payload, update) {
     profileLabel: 'AI 随机创作',
     updatedAt: Date.now()
   };
-  await setWindowSession('surpriseTask', payload.windowId, baseTask);
+  if (!await commitSurpriseTask(payload.windowId, baseTask)) {
+    const error = new Error('来源图片已切换');
+    error.code = 'STALE_SOURCE';
+    throw error;
+  }
   try {
     const resp = await doSurprise({ ...payload, ...baseTask });
     if (!resp?.ok) throw new Error(resp?.error || '生成惊喜提示词失败');
@@ -1408,16 +1557,12 @@ async function surpriseAndPersist(payload, update) {
       provider: task.provider,
       model: task.model
     });
-    const currentTask = await getWindowSession('surpriseTask', payload.windowId);
-    if (active && currentTask?.sourceRequestId === baseTask.sourceRequestId) {
-      await setWindowSession('surpriseTask', payload.windowId, task);
-    }
+    if (active) await commitSurpriseTask(payload.windowId, task);
     return { task, prompt: task.prompt, provider: task.provider, model: task.model, total: 1 };
   } catch (error) {
     const active = await update({ stage: '生成惊喜提示词失败' });
-    const currentTask = await getWindowSession('surpriseTask', payload.windowId);
-    if (active && currentTask?.sourceRequestId === baseTask.sourceRequestId) {
-      await setWindowSession('surpriseTask', payload.windowId, {
+    if (active) {
+      await commitSurpriseTask(payload.windowId, {
         ...baseTask,
         status: 'failed',
         error: errText(error),
@@ -1429,38 +1574,41 @@ async function surpriseAndPersist(payload, update) {
 }
 
 async function persistGenerationDraft(payload) {
-  const submittedAt = Number(payload.draftSubmittedAt) || Date.now();
-  const surprise = payload.albumMeta?.kind === 'surprise';
-  const expectedKey = surprise ? payload.sourceKey : sourceKey(payload.sourceSnapshot);
-  if (!expectedKey) return;
-  const kind = surprise ? 'surpriseTask' : 'panelTask';
-  const taskKey = scopedSessionKey(kind, payload.windowId);
-  const currentSourceKey = scopedSessionKey(surprise ? 'surpriseTask' : 'pendingSource', payload.windowId);
-  // 来源与草稿在一次读取中取得，避免两次等待之间的新编辑被旧快照覆盖。
-  const values = await chrome.storage.session.get([...new Set([taskKey, currentSourceKey])]);
-  const existing = values[taskKey];
-  const currentSource = values[currentSourceKey];
-  if (sourceKey(currentSource) !== expectedKey || (surprise && !currentSource?.active)) return;
-  const sameTask = sourceKey(existing) === expectedKey ? existing : {};
-  // 用户提交后继续编辑的文案更晚，应保留该草稿，而非回写较早的提交内容。
-  if (Number(sameTask.updatedAt || 0) > submittedAt) return;
-  await setWindowSession(kind, payload.windowId, {
-    ...sameTask,
-    sourceRequestId: surprise ? currentSource.sourceRequestId : payload.sourceSnapshot?.requestId || '',
-    sourceTs: surprise ? currentSource.sourceTs : payload.sourceSnapshot?.ts,
-    prompt: payload.prompt,
-    sourcePrompt: surprise ? payload.prompt : payload.sourcePrompt || payload.prompt,
-    ...(surprise ? {} : {
-      promptZh: payload.promptZh || '',
-      explanationLanguage: payload.explanationLanguage || ''
-    }),
-    ratio: payload.ratio,
-    updatedAt: submittedAt
+  return withSourceLock(payload.windowId, async () => {
+    const submittedAt = Number(payload.draftSubmittedAt) || Date.now();
+    const surprise = payload.albumMeta?.kind === 'surprise';
+    const expectedKey = surprise ? payload.sourceKey : sourceKey(payload.sourceSnapshot);
+    if (!expectedKey) return;
+    const kind = surprise ? 'surpriseTask' : 'panelTask';
+    const taskKey = scopedSessionKey(kind, payload.windowId);
+    const currentSourceKey = scopedSessionKey(surprise ? 'surpriseTask' : 'pendingSource', payload.windowId);
+    // 来源与草稿在一次读取中取得，避免两次等待之间的新编辑被旧快照覆盖。
+    const values = await chrome.storage.session.get([...new Set([taskKey, currentSourceKey])]);
+    const existing = values[taskKey];
+    const currentSource = values[currentSourceKey];
+    if (sourceKey(currentSource) !== expectedKey || (surprise && !currentSource?.active)) return;
+    const sameTask = sourceKey(existing) === expectedKey ? existing : {};
+    // 用户提交后继续编辑的文案更晚，应保留该草稿，而非回写较早的提交内容。
+    if (Number(sameTask.updatedAt || 0) > submittedAt) return;
+    await setWindowSession(kind, payload.windowId, {
+      ...sameTask,
+      sourceRequestId: surprise ? currentSource.sourceRequestId : payload.sourceSnapshot?.requestId || '',
+      sourceTs: surprise ? currentSource.sourceTs : payload.sourceSnapshot?.ts,
+      prompt: payload.prompt,
+      sourcePrompt: surprise ? payload.prompt : payload.sourcePrompt || payload.prompt,
+      ...(surprise ? {} : {
+        promptZh: payload.promptZh || '',
+        explanationLanguage: payload.explanationLanguage || ''
+      }),
+      ratio: payload.ratio,
+      updatedAt: submittedAt
+    });
   });
 }
 
 async function generateAndSave(payload, update, control) {
-  const source = payload.sourceSnapshot ? { ...payload.sourceSnapshot } : null;
+  const source = payload.sourceSnapshot?.sourceBlobId
+    ? await hydrateSource(payload.sourceSnapshot) : payload.sourceSnapshot ? { ...payload.sourceSnapshot } : null;
   control.checkpoint();
   await update({
     stage: '正在调用生图模型',
@@ -1477,8 +1625,9 @@ async function generateAndSave(payload, update, control) {
     sourceDataUrl: payload.sourceDataUrl || '',
     sourceRequestId: source?.requestId,
     sourceTs: source?.ts
-  });
+  }, control);
   if (!resp?.ok) throw new Error(resp?.error || '生成失败');
+  control.checkpoint();
   const images = Array.isArray(resp.images) && resp.images.length ? resp.images : [resp];
   const recordIds = [];
   await update({ stage: '正在保存到相册', total: images.length });
@@ -1509,7 +1658,8 @@ async function generateAndSave(payload, update, control) {
 }
 
 async function editAndSave(payload, update, control) {
-  const source = payload.sourceSnapshot ? { ...payload.sourceSnapshot } : null;
+  const source = payload.sourceSnapshot?.sourceBlobId
+    ? await hydrateSource(payload.sourceSnapshot) : payload.sourceSnapshot ? { ...payload.sourceSnapshot } : null;
   if (!source?.dataUrl) throw new Error('图生图缺少来源图片');
   control.checkpoint();
   await update({
@@ -1550,7 +1700,8 @@ async function editAndSave(payload, update, control) {
 
 async function generateGroupAndSave(payload, update, control) {
   const count = [2, 4, 6, 8].includes(Number(payload.count)) ? Number(payload.count) : 4;
-  const source = payload.sourceSnapshot ? { ...payload.sourceSnapshot } : null;
+  const source = payload.sourceSnapshot?.sourceBlobId
+    ? await hydrateSource(payload.sourceSnapshot) : payload.sourceSnapshot ? { ...payload.sourceSnapshot } : null;
   const recordIds = [];
   const groupId = payload.groupId || crypto.randomUUID();
   await update({

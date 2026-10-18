@@ -2,7 +2,7 @@
 
 EchoShot · 拍同款是一款基于 Chrome Manifest V3 的浏览器扩展。用户可以从网页图片或框选截图中反推生图提示词，生成同款图片，并在本机相册中管理结果。
 
-本仓库只公开实际发布到浏览器扩展商店的软件包内容，以及开源所必需的说明和许可证；内部备份、商店审核材料、历史安装包和开发过程文件不包含在本仓库中。
+本仓库只公开对应 GitHub Release 的扩展安装包内容，以及开源所必需的说明和许可证；内部备份、商店审核材料、历史安装包和开发过程文件不包含在本仓库中。
 
 ## 应用商店安装
 
@@ -67,7 +67,7 @@ EchoShot · 拍同款是一款基于 Chrome Manifest V3 的浏览器扩展。用
 
 ## 开源范围
 
-公开源码与商店发布包中的运行代码保持一致。本仓库不包含真实 API Key、审核临时密钥或用户数据。
+公开源码与对应 GitHub Release ZIP 中的运行代码保持一致，商店版本以各商店的审核发布状态为准。本仓库不包含真实 API Key、审核临时密钥或用户数据。
 
 ## 许可证
 
@@ -81,7 +81,7 @@ EchoShot · 拍同款 is a Chrome Manifest V3 extension for reconstructing image
 
 Users provide their own API keys. Source images, prompts, reference assets, and generated results are stored locally, except when the user explicitly starts a task that sends the required data to the selected AI provider.
 
-This public repository mirrors the files shipped in the browser extension package, plus the README and AGPL-3.0 license. Internal backups, review materials, historical packages, credentials, and user data are not included.
+This public repository mirrors the extension package in the corresponding GitHub Release, plus the README and AGPL-3.0 license. Browser store versions depend on each store's review and publication status. Internal backups, review materials, historical packages, credentials, and user data are not included.
 
 ## Install from a browser store
 

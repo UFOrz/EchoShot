@@ -52,7 +52,7 @@
       <div class="platform-manager">
         <aside class="platform-sidebar" aria-label="平台列表">
           <div class="platform-list-label">平台列表</div>
-          <div id="platformList" class="platform-list" role="listbox"></div>
+          <div id="platformList" class="platform-list"></div>
         </aside>
         <div id="platformDetail" class="platform-detail"></div>
       </div>
@@ -169,7 +169,17 @@
       <a class="footer-link" href="../privacy/privacy.html" target="_blank" rel="noopener noreferrer">隐私政策</a>
     </div>
   </div>
-  <div id="toast" class="toast" hidden></div>
+  <div id="toast" class="toast" role="status" aria-live="polite" aria-atomic="true" hidden></div>
+  <dialog id="localBackupRestoreDialog" class="backup-restore-dialog" aria-labelledby="localBackupRestoreTitle" aria-describedby="localBackupRestoreDescription">
+    <form method="dialog">
+      <h2 id="localBackupRestoreTitle">从备份恢复相册</h2>
+      <p id="localBackupRestoreDescription">将从备份恢复缺失的相册和角色库记录，不覆盖现有记录。是否继续？</p>
+      <div class="backup-restore-dialog-actions">
+        <button id="localBackupRestoreCancel" class="btn" value="cancel" autofocus>取消</button>
+        <button id="localBackupRestoreConfirm" class="btn primary" value="restore">开始恢复</button>
+      </div>
+    </form>
+  </dialog>
   <script type="module" src="options.js"></script>
   <script type="module" src="local-backup.js"></script>
 </body>

@@ -1,6 +1,6 @@
 // 侧边栏面板：来源图片 → 反推提示词 → 生成同款图片 → 自动存入相册
 
-import { buildModelAliasIndex, imageEditReferenceLimit, listModelChoices, loadSettings, recordModelDisplayName, requiresSourceImage, saveSettings, supportsImageEdit } from '../lib/settings.js';
+import { allowsEmptyApiKey, buildModelAliasIndex, imageEditReferenceLimit, listModelChoices, loadSettings, recordModelDisplayName, requiresSourceImage, saveSettings, supportsImageEdit } from '../lib/settings.js';
 import { getById, getSourceBlob, addCharacter, getCharacters, getCharacterById, removeCharacters } from '../lib/db.js';
 import { detectImageFileType } from '../lib/image-file.js';
 import {
@@ -22,6 +22,7 @@ import { grantPrivacyConsent, hasPrivacyConsent } from '../lib/privacy.js';
 import { explanationLabel, localizeDocument, localizeRuntimeError, resolveLanguage, t } from '../lib/i18n.js';
 import { blobFromDataUrl, normalizeImageBlob } from '../lib/api.js';
 import { imageAspectInfo } from '../lib/generation-results.js';
+import { hydrateSource, sourceMetadata } from '../lib/source-store.js';
 
 const $ = (id) => document.getElementById(id);
 const MAX_CONCURRENT_GENERATION_JOBS = 4;
@@ -196,6 +197,7 @@ let lastResult = null;      // 最近一次生成结果
 let lastAlbumRecordId = ''; // 当前结果在相册中的记录 ID
 let reversing = false;
 let generating = false;
+let localGenerationOwner = null;
 let toastTimer = 0;
 let reverseSeq = 0;
 let taskWriteChain = Promise.resolve();
@@ -239,6 +241,7 @@ let regionCaptureActive = false;
 let dragDepth = 0;
 let droppedImageSeq = 0;
 let sourcePreviewOverride = null;
+let sourceHydrationSeq = 0;
 let workspaceSyncQueued = false;
 let surpriseMode = false;
 let surpriseGenerating = false;
@@ -431,7 +434,7 @@ function syncWorkspaceChrome() {
     const selected = settings?.defaults?.[type];
     const platform = settings?.platforms?.find(item => item.id === selected?.platformId);
     const models = type === 'vision' ? platform?.visionModels : platform?.imageModels;
-    return Boolean(models?.includes(selected?.model) && platform && (platform.apiKey || /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(?=[:/]|$)/i.test(platform.baseUrl)));
+    return Boolean(models?.includes(selected?.model) && platform && (platform.apiKey || allowsEmptyApiKey(platform)));
   };
   $('firstUseGuide').hidden = configured('vision') && configured('image');
 }
@@ -479,13 +482,24 @@ function localizedJobStage(stage = '') {
 }
 
 function setCancelControls(activeKind = '', cancelRequested = false) {
-  show(els.btnCancelGroup, activeKind === 'group');
+  show(els.btnCancelGroup, ['group', 'replacement', 'single'].includes(activeKind));
   els.btnCancelGroup.disabled = cancelRequested;
+  const label = ui(activeKind === 'single'
+    ? (activeSingleGenerationCount() > 1 ? '停止全部生成' : '停止生成') : '停止任务');
+  els.btnCancelGroup.setAttribute('aria-label', label);
+  els.btnCancelGroup.dataset.tooltip = label;
 }
 
 async function cancelGroupJob() {
   els.btnCancelGroup.disabled = true;
   try {
+    const singles = generationJobsState.filter(job => job.status === 'running');
+    if (singles.length && !localGenerationOwner) {
+      const responses = await Promise.all(singles.map(job => send({ type: 'ir.generation.cancel', payload: { jobId: job.id } })));
+      if (!responses.some(response => response?.ok)) throw new Error(responses[0]?.error || ui('当前没有可停止的生图任务'));
+      showToast(ui('已停止本地等待；平台上的任务可能仍在运行'));
+      return;
+    }
     const response = await send({ type: 'ir.job.cancel' });
     if (!response?.ok) {
       showToast(ui(response?.error || '当前没有可停止的任务'));
@@ -604,10 +618,6 @@ async function handleDroppedImage(file) {
     mime: normalized.mime
   };
 
-  // 选图明确结束手写/随机创作；返回首页后也不能保留旧的活动草稿。
-  await removeWindowSession('surpriseTask');
-  if (operation !== droppedImageSeq) return;
-
   if (prompt) {
     const ratio = String(embeddedMetadata?.ratio || '');
     const task = {
@@ -624,11 +634,7 @@ async function handleDroppedImage(file) {
       metadataSource: prepared.metadataSource,
       updatedAt: Date.now()
     };
-    await Promise.all([
-      setWindowSession('pendingSource', prepared),
-      setWindowSession('panelTask', task)
-    ]);
-    if (operation !== droppedImageSeq) return;
+    if (!await commitPanelSource(prepared, task) || operation !== droppedImageSeq) return;
     applySource(prepared);
     await restoreTask(prepared);
     setPromptDoneLabel(true);
@@ -638,11 +644,7 @@ async function handleDroppedImage(file) {
     return;
   }
 
-  await Promise.all([
-    setWindowSession('pendingSource', prepared),
-    removeWindowSession('panelTask')
-  ]);
-  if (operation !== droppedImageSeq) return;
+  if (!await commitPanelSource(prepared) || operation !== droppedImageSeq) return;
   applySource(prepared);
   showToast(ui('图片没有可识别的生成提示词，正在反推'));
 }
@@ -739,6 +741,7 @@ function applyDefaultRatio() {
 }
 
 function resetTaskUI() {
+  releaseGenerationOwner(localGenerationOwner);
   show($('surpriseChoices'), false);
   show($('visionModelPicker'), true);
   show($('btnSurpriseAgain'), true);
@@ -786,6 +789,52 @@ function resetTaskUI() {
   applyDefaultRatio();
 }
 
+function claimGenerationOwner(job = null) {
+  const key = sourceKey(source);
+  if (!localGenerationOwner || localGenerationOwner.sourceKey !== key ||
+      (job && localGenerationOwner.jobId && localGenerationOwner.jobId !== job.id)) {
+    localGenerationOwner = { sourceKey: key, jobId: job?.id || '', startedAt: job?.startedAt || Date.now() };
+  } else if (job) {
+    localGenerationOwner.jobId = job.id;
+  }
+  generating = true;
+  els.btnGenerate.disabled = true;
+  return localGenerationOwner;
+}
+
+function releaseGenerationOwner(owner) {
+  if (owner !== localGenerationOwner) return false;
+  localGenerationOwner = null;
+  generating = false;
+  els.btnGenerate.disabled = false;
+  $('btnReplaceGenerate').disabled = false;
+  setCancelControls('');
+  return true;
+}
+
+async function commitPanelSource(prepared, task) {
+  const result = await send({ type: 'ir.setSource', payload: { source: prepared, task } });
+  if (!result?.ok && !result?.stale) throw new Error(result?.error || ui('图片读取失败'));
+  if (result?.ok) sourceHydrationSeq += 1;
+  if (result?.source) Object.assign(prepared, result.source);
+  return Boolean(result?.ok);
+}
+
+async function writeSurpriseTask(task, activate = false) {
+  try {
+    const result = await send({ type: 'ir.setSurpriseTask', payload: { task, activate } });
+    if (result?.ok) return true;
+    if (result?.stale) return false;
+    throw new Error(result?.error || ui('未知错误'));
+  } catch (error) {
+    if (sourceKey(source) === task.sourceRequestId) {
+      if (activate && task.status === 'running') renderSurpriseFailure({ ...task, error: error?.message || String(error) });
+      showToast(localizeRuntimeError(error, currentLanguage));
+    }
+    return false;
+  }
+}
+
 function persistTask(patch = {}) {
   const taskSource = source;
   if (!taskSource || taskSource.status !== 'ready') return taskWriteChain;
@@ -794,7 +843,7 @@ function persistTask(patch = {}) {
     taskWriteChain = taskWriteChain.then(async () => {
       if (!surpriseMode || sourceKey(source) !== expectedKey) return;
       const existing = await getWindowSession('surpriseTask');
-      await setWindowSession('surpriseTask', {
+      await writeSurpriseTask({
         ...(existing || {}),
         active: true,
         status: 'ready',
@@ -839,15 +888,12 @@ function persistTask(patch = {}) {
 
 async function restoreTask(taskSource) {
   const expectedKey = sourceKey(taskSource);
-  const reverseJob = await getWindowSession('reverseJob');
-  if (sourceKey(source) !== expectedKey) return;
-  if (reverseJob?.sourceKey === expectedKey && reverseJob.status !== 'completed') {
-    renderBackgroundReverseJob(reverseJob);
-    return;
-  }
-  const panelTask = await getWindowSession('panelTask');
+  const [reverseJob, panelTask] = await Promise.all([
+    getWindowSession('reverseJob'), getWindowSession('panelTask')
+  ]);
   if (sourceKey(source) !== expectedKey) return;
   if (sourceKey(panelTask) !== expectedKey) {
+    if (reverseJob?.sourceKey === expectedKey) renderBackgroundReverseJob(reverseJob);
     if (generationJobsState.length) await renderGenerationJobs(generationJobsState, { restore: true });
     return;
   }
@@ -855,7 +901,7 @@ async function restoreTask(taskSource) {
   reversedPrompt = panelTask.sourcePrompt || '';
   reversedPromptZh = panelTask.promptZh || '';
   reversedPromptLanguage = panelTask.explanationLanguage || (reversedPromptZh ? 'zh' : '');
-  els.taPrompt.value = panelTask.prompt || reversedPrompt;
+  els.taPrompt.value = panelTask.prompt ?? reversedPrompt;
   els.taPrompt.placeholder = ui('可以直接编辑提示词');
   setPromptDoneLabel(Boolean(taskSource.embeddedMetadata));
   show(els.reverseDone, Boolean(els.taPrompt.value));
@@ -868,6 +914,10 @@ async function restoreTask(taskSource) {
     updateHints();
   }
   updateHints();
+
+  if (reverseJob?.sourceKey === expectedKey && reverseJob.status !== 'completed') {
+    renderBackgroundReverseJob(reverseJob);
+  }
 
   if (panelTask.albumRecordId) {
     const rec = await getById(panelTask.albumRecordId);
@@ -884,7 +934,8 @@ async function consumeNewSourceAndReverse(s) {
   const consumed = { ...s, needsReverse: false };
   source = consumed;
   try {
-    await setWindowSession('pendingSource', consumed);
+    const result = await send({ type: 'ir.setSource', payload: { source: consumed, expectedRequestId: s.requestId } });
+    if (!result?.ok) return;
   } catch { /* 即使状态写入失败，本次用户点击仍继续处理 */ }
   if (sourceKey(source) === expectedKey) await autoReverse();
 }
@@ -892,11 +943,16 @@ async function consumeNewSourceAndReverse(s) {
 // ---------- 来源图片 ----------
 
 async function refreshPending() {
+  const operation = sourceHydrationSeq;
+  const expectedKey = sourceKey(source);
+  const current = () => operation === sourceHydrationSeq && sourceKey(source) === expectedKey;
   try {
     const resp = await send({ type: 'ir.getPending' });
+    if (!current()) return;
     if (resp?.ok && resp.source) applySource(resp.source);
     else renderEmpty();
   } catch (e) {
+    if (!current()) return;
     renderEmpty();
     showToast(ui('读取图片状态失败：{error}', { error: e?.message || e }));
   }
@@ -933,14 +989,15 @@ function renderSurpriseFailure(task = {}) {
   setSurpriseModelState();
   els.taPrompt.placeholder = '';
   els.reverseError.textContent = ui('生成惊喜提示词失败：{error}', {
-    error: task.error || ui('未知错误')
+    error: localizeRuntimeError(task.error || ui('未知错误'), currentLanguage)
   });
   show(els.reverseError, true);
   setSurpriseButtonsDisabled(false);
 }
 
 async function renderSurpriseTask(task, { restoreResult = true } = {}) {
-  if (!task?.prompt && task?.profile !== 'manual') return false;
+  const hasReadyDraft = task?.status === 'ready' && typeof task.prompt === 'string';
+  if (!task?.prompt && task?.profile !== 'manual' && !hasReadyDraft) return false;
   const ts = Number(task.sourceTs || task.updatedAt || Date.now());
   const requestId = task.sourceRequestId || `surprise:${crypto.randomUUID()}`;
   const preserveVisibleResult =
@@ -988,7 +1045,14 @@ async function renderSurpriseTask(task, { restoreResult = true } = {}) {
 }
 
 async function refreshWorkspace() {
-  const surpriseTask = await getWindowSession('surpriseTask').catch(() => null);
+  let surpriseTask = await getWindowSession('surpriseTask').catch(() => null);
+  if (surpriseTask?.active && surpriseTask.status === 'failed') {
+    const pending = await getWindowSession('pendingSource').catch(() => null);
+    if (pending && Number(pending.ts) > Number(surpriseTask.sourceTs || 0)) {
+      void sendQuietly({ type: 'ir.dismissSurpriseTask', payload: { sourceRequestId: surpriseTask.sourceRequestId } });
+      surpriseTask = null;
+    }
+  }
   if (surpriseTask?.active) {
     if (surpriseTask.status === 'choice') {
       renderSurpriseChoices(surpriseTask);
@@ -1002,7 +1066,8 @@ async function refreshWorkspace() {
       renderSurpriseFailure(surpriseTask);
       return;
     }
-    if (surpriseTask.prompt || surpriseTask.profile === 'manual') {
+    if (surpriseTask.prompt || surpriseTask.profile === 'manual' ||
+        (surpriseTask.status === 'ready' && typeof surpriseTask.prompt === 'string')) {
       await renderSurpriseTask(surpriseTask);
       return;
     }
@@ -1023,7 +1088,7 @@ async function openSurpriseChoices() {
   if (generating || reversing || surpriseGenerating) return showToast(ui('当前已有生成任务进行中'));
   const task = { active: true, status: 'choice', sourceRequestId: `surprise:${crypto.randomUUID()}`, sourceTs: Date.now() };
   renderSurpriseChoices(task);
-  await setWindowSession('surpriseTask', task).catch(() => {});
+  await writeSurpriseTask(task, true);
 }
 
 async function openManualPrompt() {
@@ -1032,7 +1097,7 @@ async function openManualPrompt() {
   const task = { active: true, status: 'ready', profile: 'manual', profileLabel: '手动输入',
     prompt: '', sourceRequestId: `surprise:${crypto.randomUUID()}`, sourceTs: Date.now(), ratio: els.selRatio.value };
   await renderSurpriseTask(task, { restoreResult: false });
-  await setWindowSession('surpriseTask', task).catch(() => {});
+  await writeSurpriseTask(task, true);
   els.taPrompt.focus();
 }
 
@@ -1057,7 +1122,7 @@ async function createSurprisePrompt() {
     updatedAt: Date.now()
   };
   renderSurpriseLoading(task);
-  await setWindowSession('surpriseTask', task).catch(() => {});
+  if (!await writeSurpriseTask(task, true)) return;
   try {
     const resp = await send({
       type: 'ir.job.surprise',
@@ -1086,8 +1151,10 @@ async function createSurprisePrompt() {
       error: error?.message || String(error),
       updatedAt: Date.now()
     };
-    await setWindowSession('surpriseTask', failedTask).catch(() => {});
-    if (sourceKey(source) === task.sourceRequestId) renderSurpriseFailure(failedTask);
+    if (sourceKey(source) !== task.sourceRequestId) return;
+    const currentTask = await getWindowSession('surpriseTask');
+    if (sourceKey(source) !== task.sourceRequestId || currentTask?.sourceRequestId !== task.sourceRequestId) return;
+    renderSurpriseFailure(failedTask);
   }
 }
 
@@ -1103,7 +1170,9 @@ function applySource(s) {
   const becameReady = s.status === 'ready' && (isNew || source?.status !== 'ready');
   if (isNew) {
     sourcePreviewOverride = null;
-    void removeWindowSession('surpriseTask');
+    if (surpriseMode) {
+      void sendQuietly({ type: 'ir.dismissSurpriseTask', payload: { sourceRequestId: sourceKey(source) } });
+    }
     reverseSeq += 1; // 让旧图片仍在等待的反推响应失效
     reversing = false;
     resetTaskUI();
@@ -1166,6 +1235,34 @@ function applySource(s) {
   }
 }
 
+async function applyStoredSource(stored) {
+  const operation = ++sourceHydrationSeq;
+  // Consuming needsReverse only updates metadata. Preserve ready pixels while
+  // its runtime reply starts reverse; a temporary loading state would skip it.
+  if (stored.status === 'ready' && stored.sourceBlobId &&
+      source?.status === 'ready' && source.dataUrl &&
+      sourceKey(source) === sourceKey(stored) && source.sourceBlobId === stored.sourceBlobId) {
+    applySource({ ...stored, dataUrl: source.dataUrl });
+    return;
+  }
+  if (stored.status !== 'ready' || stored.dataUrl || !stored.sourceBlobId) {
+    applySource(stored);
+    return;
+  }
+  applySource({ ...stored, status: 'loading' });
+  try {
+    const hydrated = await hydrateSource(stored);
+    if (operation === sourceHydrationSeq && sourceKey(source) === sourceKey(stored)) applySource(hydrated);
+  } catch (error) {
+    if (operation !== sourceHydrationSeq || sourceKey(source) !== sourceKey(stored)) return;
+    applySource({ ...stored, status: 'error', error: localizeRuntimeError(error, currentLanguage) });
+  }
+}
+
+function sourceSnapshotOf(value) {
+  return value?.sourceBlobId ? sourceMetadata(value) : value ? { ...value } : null;
+}
+
 function renderEmpty() {
   source = null;
   clearResultCards();
@@ -1190,7 +1287,7 @@ chrome.storage.session.onChanged.addListener((changes) => {
   const generationJobsChange = changes[windowSessionKey('generationJobs')];
   const reverseJobChange = changes[windowSessionKey('reverseJob')];
   const surpriseChange = changes[windowSessionKey('surpriseTask')];
-  if (pendingChange?.newValue) applySource(pendingChange.newValue);
+  if (pendingChange?.newValue) void applyStoredSource(pendingChange.newValue);
   if (actionChange?.newValue) void handleAlbumAction().catch((e) => showToast(e?.message || e));
   if (feedbackChange?.newValue) {
     regionCaptureActive = false;
@@ -1252,10 +1349,6 @@ async function autoReverse() {
   const currentSourceKey = sourceKey(source);
   const opId = ++reverseSeq;
   reversing = true;
-  reversedPrompt = '';
-  reversedPromptZh = '';
-  reversedPromptLanguage = '';
-  els.taPrompt.value = '';
   els.taPrompt.placeholder = ui('正在反推提示词…');
   show(els.zhNote, false);
   show(els.reverseDone, false);
@@ -1263,6 +1356,8 @@ async function autoReverse() {
   show(els.reverseLoading, true);
   els.btnReverse.disabled = true;
   try {
+    await persistTask();
+    if (opId !== reverseSeq || sourceKey(source) !== currentSourceKey) return;
     const resp = await send({
       type: 'ir.job.reverse',
       payload: { sourceRequestId, sourceTs, selection: selectedModel(els.selVisionModel) }
@@ -1285,13 +1380,13 @@ async function autoReverse() {
       void persistTask();
     } else {
       els.taPrompt.placeholder = '';
-      els.reverseError.textContent = ui('反推失败：{error}', { error: resp?.error || ui('未知错误') });
+      els.reverseError.textContent = ui('反推失败：{error}', { error: localizeRuntimeError(resp?.error || ui('未知错误'), currentLanguage) });
       show(els.reverseError, true);
     }
   } catch (e) {
     if (opId === reverseSeq && sourceKey(source) === currentSourceKey) {
       els.taPrompt.placeholder = '';
-      els.reverseError.textContent = ui('反推失败：{error}', { error: e?.message || e });
+      els.reverseError.textContent = ui('反推失败：{error}', { error: localizeRuntimeError(e, currentLanguage) });
       show(els.reverseError, true);
     }
   } finally {
@@ -1341,10 +1436,6 @@ function renderBackgroundReverseJob(job) {
   setVisibleReverseJobState(job);
   if (job.status === 'running') {
     reversing = true;
-    reversedPrompt = '';
-    reversedPromptZh = '';
-    els.taPrompt.value = '';
-    show(els.zhNote, false);
     show(els.reverseDone, false);
     show(els.reverseError, false);
     show(els.reverseLoading, true);
@@ -1359,13 +1450,9 @@ function renderBackgroundReverseJob(job) {
   if (job.status === 'completed') {
     applyReverseResult(job);
   } else if (job.status === 'failed') {
-    reversedPrompt = '';
-    reversedPromptZh = '';
-    els.taPrompt.value = '';
-    els.taPrompt.placeholder = '';
-    show(els.zhNote, false);
+    els.taPrompt.placeholder = ui('可以直接编辑提示词');
     show(els.reverseDone, false);
-    els.reverseError.textContent = ui('反推失败：{error}', { error: job.error || ui('未知错误') });
+    els.reverseError.textContent = ui('反推失败：{error}', { error: localizeRuntimeError(job.error || ui('未知错误'), currentLanguage) });
     show(els.reverseError, true);
   }
 }
@@ -1398,8 +1485,10 @@ function renderGenerationJobsProgress() {
   els.btnGenerate.disabled = generating || active.length >= MAX_CONCURRENT_GENERATION_JOBS;
   if (!active.length) {
     show(els.genProgress, false);
+    if (!localGenerationOwner) setCancelControls('');
     return;
   }
+  if (!localGenerationOwner) setCancelControls('single', active.every(job => job.cancelRequested));
   show(els.genDone, false);
   show(els.genError, false);
   const oldestStartedAt = Math.min(...active.map((job) => Number(job.startedAt) || Date.now()));
@@ -1460,7 +1549,7 @@ async function generate(original = null) {
   generationSubmitLocked = true;
   setTimeout(() => { generationSubmitLocked = false; }, 500);
   const surpriseSnapshot = original ? original.kind === 'surprise' : surpriseMode;
-  const sourceSnapshot = original ? original.sourceSnapshot : source ? { ...source } : null;
+  const sourceSnapshot = sourceSnapshotOf(original ? original.sourceSnapshot : source);
   const sourceKeySnapshot = original ? original.sourceKey : sourceKey(sourceSnapshot);
   const sourcePromptSnapshot = reversedPrompt || prompt;
   const promptZhSnapshot = reversedPromptZh;
@@ -1518,9 +1607,9 @@ async function generate(original = null) {
       // 清理本地占位并直接展示错误。
       removeLocalGenerationJob(clientJobId);
       const sourceChanged = sourceKey(source) !== sourceKey(sourceSnapshot);
-      if (sourceChanged) showToast(ui('上一张图片生成失败：{error}', { error: resp?.error || ui('未知错误') }));
+      if (sourceChanged) showToast(ui('上一张图片生成失败：{error}', { error: localizeRuntimeError(resp?.error || ui('未知错误'), currentLanguage) }));
       else {
-        els.genError.textContent = ui('生成失败：{error}', { error: resp?.error || ui('未知错误') });
+        els.genError.textContent = ui('生成失败：{error}', { error: localizeRuntimeError(resp?.error || ui('未知错误'), currentLanguage) });
         show(els.genError, true);
         showToast(els.genError.textContent);
       }
@@ -1677,7 +1766,7 @@ async function replaceCharacter() {
     ? $('replaceType').value
     : 'person';
   const instruction = $('replaceInstruction').value.trim() || defaultReplaceInstruction(replaceType);
-  const sourceSnapshot = { ...source };
+  const sourceSnapshot = sourceSnapshotOf(source);
   const albumPromptSnapshot = els.taPrompt.value.trim() || reversedPrompt || instruction;
   const sourcePromptSnapshot = reversedPrompt || albumPromptSnapshot;
   const promptZhSnapshot = reversedPromptZh;
@@ -1685,14 +1774,15 @@ async function replaceCharacter() {
   const selectionSnapshot = selectedModel(els.selImageModel);
   const button = $('btnReplaceGenerate');
   button.disabled = true;
-  generating = true;
-  els.btnGenerate.disabled = true;
+  const generationOwner = claimGenerationOwner();
+  setCancelControls('replacement');
   show(els.replaceDone, false);
   show(els.replaceError, false);
   show(els.replaceProgress, true);
   els.replaceProgressText.textContent = ui('正在替换角色或者物品…');
   const startedAt = Date.now();
   const progressTimer = setInterval(() => {
+    if (localGenerationOwner !== generationOwner) return;
     els.replaceProgressText.textContent = ui('正在替换角色或者物品，已等待 {seconds} 秒…', {
       seconds: Math.round((Date.now() - startedAt) / 1000)
     });
@@ -1725,16 +1815,14 @@ async function replaceCharacter() {
     show(els.replaceDone, true);
     if (resp.cancelled) showToast(ui('任务已停止，当前已完成的图片已保存'));
   } catch (error) {
+    if (localGenerationOwner !== generationOwner) return;
     els.replaceError.textContent = ui('替换失败：{error}', {
       error: localizeRuntimeError(error, currentLanguage)
     });
     show(els.replaceError, true);
   } finally {
     clearInterval(progressTimer);
-    button.disabled = false;
-    generating = false;
-    els.btnGenerate.disabled = false;
-    show(els.replaceProgress, false);
+    if (releaseGenerationOwner(generationOwner)) show(els.replaceProgress, false);
   }
 }
 
@@ -1876,7 +1964,10 @@ async function presentSavedResult(resp, label = '生成') {
 function replacementEditSelection() {
   const choices = listModelChoices(settings, 'image');
   const current = selectedModel(els.selImageModel);
-  const hasKey = (item) => Boolean(settings.platforms.find((platform) => platform.id === item.platformId)?.apiKey);
+  const hasKey = (item) => {
+    const platform = settings.platforms.find(platform => platform.id === item.platformId);
+    return Boolean(platform && (platform.apiKey || allowsEmptyApiKey(platform)));
+  };
   const currentChoice = choices.find((item) =>
     item.platformId === current.platformId && item.model === current.model);
   if (currentChoice && supportsImageEdit(currentChoice) && hasKey(currentChoice)) return currentChoice;
@@ -1958,7 +2049,16 @@ function setVisibleJobState(job) {
 }
 
 async function renderBackgroundJob(job, { restore = false } = {}) {
-  if (!job || (job.sourceKey && job.sourceKey !== sourceKey(source))) return;
+  if (!job) return;
+  if (job.sourceKey && job.sourceKey !== sourceKey(source)) {
+    if (localGenerationOwner?.jobId === job.id) releaseGenerationOwner(localGenerationOwner);
+    return;
+  }
+  if (localGenerationOwner && !localGenerationOwner.jobId &&
+      Number(job.startedAt) < localGenerationOwner.startedAt) return;
+  // 旧任务的迟到终态也不能解锁同来源上后来启动的新任务。
+  if (job.status !== 'running' && localGenerationOwner?.jobId &&
+      localGenerationOwner.jobId !== job.id) return;
   const expectedSourceKey = sourceKey(source);
   setVisibleJobState(job);
   const elapsed = Math.max(0, Math.round(((job.finishedAt || Date.now()) - job.startedAt) / 1000));
@@ -1966,16 +2066,14 @@ async function renderBackgroundJob(job, { restore = false } = {}) {
     show(els.secBatch, true);
     $('batchStatus').classList.toggle('batch-running', job.status === 'running');
     const records = await loadJobRecords(job.recordIds || []);
-    if (sourceKey(source) !== expectedSourceKey) return;
+    if (sourceKey(source) !== expectedSourceKey || visibleJobState !== job) return;
     records.forEach((record, index) => appendGroupPreview(record, index + 1, job.total || records.length));
     if (job.status === 'running') {
-      generating = true;
-      els.btnGenerate.disabled = true;
+      claimGenerationOwner(job);
       setCancelControls('group', Boolean(job.cancelRequested));
       $('batchStatus').textContent = ui('正在生成组图，已等待 {seconds} 秒…', { seconds: elapsed });
     } else if (job.status === 'completed') {
-      generating = false;
-      els.btnGenerate.disabled = false;
+      releaseGenerationOwner(localGenerationOwner);
       showLatestGroupResult(records.at(-1), { reveal: !restore });
       $('batchStatus').textContent = ui('{count} 张组图已完成并保存到相册；用时 {seconds} 秒。', {
         count: records.length,
@@ -1983,17 +2081,15 @@ async function renderBackgroundJob(job, { restore = false } = {}) {
       });
       setCancelControls('');
     } else if (job.status === 'cancelled') {
-      generating = false;
-      els.btnGenerate.disabled = false;
+      releaseGenerationOwner(localGenerationOwner);
       if (records.length) showLatestGroupResult(records.at(-1));
       $('batchStatus').textContent = ui('任务已停止，已保留 {count} 张图片', { count: records.length });
       setCancelControls('');
     } else if (job.status === 'failed') {
-      generating = false;
-      els.btnGenerate.disabled = false;
+      releaseGenerationOwner(localGenerationOwner);
       if (records.length) showLatestGroupResult(records.at(-1));
       $('batchStatus').textContent = ui('组图生成中断：{error}{saved}', {
-        error: job.error || ui('未知错误'),
+        error: localizeRuntimeError(job.error || ui('未知错误'), currentLanguage),
         saved: records.length ? ui('；已保留前 {count} 张。', { count: records.length }) : ''
       });
       setCancelControls('');
@@ -2002,10 +2098,10 @@ async function renderBackgroundJob(job, { restore = false } = {}) {
   }
 
   const isReplacement = job.label === 'replacement';
-  setCancelControls('');
+  if (isReplacement) setReplacePanel(true);
+  setCancelControls(isReplacement && job.status === 'running' ? 'replacement' : '', Boolean(job.cancelRequested));
   if (job.status === 'running') {
-    generating = true;
-    els.btnGenerate.disabled = true;
+    claimGenerationOwner(job);
     if (isReplacement) {
       show(els.replaceProgress, true);
       els.replaceProgressText.textContent = ui('{stage}，已等待 {seconds} 秒…', {
@@ -2022,8 +2118,7 @@ async function renderBackgroundJob(job, { restore = false } = {}) {
     return;
   }
 
-  generating = false;
-  els.btnGenerate.disabled = false;
+  releaseGenerationOwner(localGenerationOwner);
   show(els.genProgress, false);
   show(els.replaceProgress, false);
   setCancelControls('');
@@ -2036,7 +2131,7 @@ async function renderBackgroundJob(job, { restore = false } = {}) {
     const target = isReplacement ? els.replaceError : els.genError;
     target.textContent = ui('{action}失败：{error}', {
       action: ui(isReplacement ? '替换' : '生成'),
-      error: job.error || ui('未知错误')
+      error: localizeRuntimeError(job.error || ui('未知错误'), currentLanguage)
     });
     show(target, true);
   } else if (job.status === 'cancelled') {
@@ -2104,6 +2199,10 @@ async function renderGenerationJobsNow(jobs, { restore = false } = {}) {
         lastAlbumRecordId = previousAlbumRecordId;
       }
     }
+    observedGenerationJobIds.delete(job.id);
+  }
+  for (const job of terminal) {
+    if (job.status !== 'completed') observedGenerationJobIds.delete(job.id);
   }
   if (newestRecord) {
     void persistTask({ albumRecordId: newestRecord.id });
@@ -2121,7 +2220,7 @@ async function renderGenerationJobsNow(jobs, { restore = false } = {}) {
   const latestFailure = matching.filter((job) => job.status === 'failed').at(-1);
   if (latestFailure) {
     els.genError.textContent = ui('生成失败：{error}', {
-      error: latestFailure.error || ui('未知错误')
+      error: localizeRuntimeError(latestFailure.error || ui('未知错误'), currentLanguage)
     });
     show(els.genError, true);
     if (!restore) showToast(els.genError.textContent);
@@ -2131,7 +2230,7 @@ async function renderGenerationJobsNow(jobs, { restore = false } = {}) {
     const latest = terminal.at(-1);
     if (latest?.status === 'completed') showToast(ui('上一张图片的生成已完成，已保存到相册'));
     else if (latest?.status === 'failed') {
-      showToast(ui('上一张图片生成失败：{error}', { error: latest.error || ui('未知错误') }));
+      showToast(ui('上一张图片生成失败：{error}', { error: localizeRuntimeError(latest.error || ui('未知错误'), currentLanguage) }));
     }
   }
 }
@@ -2152,7 +2251,7 @@ async function generateGroup(requestedCount) {
   if (requiresSourceImage(imageChoice)) {
     return showToast(ui('当前模型仅支持图片编辑，请切换到支持文生图的模型'));
   }
-  const sourceSnapshot = source ? { ...source } : null;
+  const sourceSnapshot = sourceSnapshotOf(source);
 
   const sourcePromptSnapshot = reversedPrompt || prompt;
   const promptZhSnapshot = reversedPromptZh;
@@ -2167,8 +2266,7 @@ async function generateGroup(requestedCount) {
       seconds: elapsedSeconds()
     });
   };
-  generating = true;
-  els.btnGenerate.disabled = true;
+  const generationOwner = claimGenerationOwner();
   show(els.secBatch, true);
   show(els.genDone, false);
   clearJobPreviewUrls();
@@ -2231,7 +2329,7 @@ async function generateGroup(requestedCount) {
     }
     $('batchStatus').textContent = ui('组图生成中断（已等待 {seconds} 秒）：{error}{saved}', {
       seconds: elapsedSeconds(),
-      error: error?.message || error,
+      error: localizeRuntimeError(error, currentLanguage),
       saved: saved ? ui('；已保留并保存前 {count} 张。', { count: saved }) : ''
     });
     showToast(saved
@@ -2239,10 +2337,7 @@ async function generateGroup(requestedCount) {
       : ui('组图生成失败'));
   } finally {
     clearInterval(groupTimer);
-    $('batchStatus').classList.remove('batch-running');
-    generating = false;
-    els.btnGenerate.disabled = false;
-    setCancelControls('');
+    if (releaseGenerationOwner(generationOwner)) $('batchStatus').classList.remove('batch-running');
   }
 }
 
@@ -2252,11 +2347,12 @@ async function handleAlbumAction() {
   await removeWindowSession('albumAction');
   const rec = await getById(albumAction.recordId);
   if (!rec) return showToast(ui('未找到相册作品'));
-  const dataUrl = await blobToDataUrl(rec.blob);
+  const normalized = await normalizeImageBlob(rec.blob, 2048, { forceReencode: true });
+  const dataUrl = normalized.dataUrl;
   const prepared = { requestId: crypto.randomUUID(), ts: Date.now(), status: 'ready', needsReverse: false,
     src: rec.srcUrl || '', pageUrl: rec.pageUrl || '', pageTitle: '来自 EchoShot · 拍同款相册', dataUrl,
-    width: rec.width, height: rec.height, mime: rec.blob.type || 'image/png', sourceAssetId: `record:${rec.id}` };
-  await setWindowSession('pendingSource', prepared);
+    width: normalized.width, height: normalized.height, mime: normalized.mime, sourceAssetId: `record:${rec.id}` };
+  if (!await commitPanelSource(prepared)) return;
   applySource(prepared);
   els.taPrompt.value = rec.prompt || '';
   reversedPrompt = rec.sourcePrompt || rec.prompt || '';
@@ -2539,8 +2635,6 @@ async function resolvePanelWindowId() {
     await refreshWorkspace();
     await refreshCharacters();
     await handleAlbumAction();
-    const reverseJob = await getWindowSession('reverseJob');
-    if (reverseJob) renderBackgroundReverseJob(reverseJob);
     const job = await getWindowSession('job');
     if (job) await renderBackgroundJob(job, { restore: true });
     const generationJobs = await getWindowSession('generationJobs');

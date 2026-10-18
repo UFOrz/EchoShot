@@ -5,6 +5,7 @@ import {
   PRESETS,
   RATIOS,
   applyRunningHubModelCatalog,
+  allowsEmptyApiKey,
   isRunningHubPreset,
   listModelChoices,
   loadSettings,
@@ -13,7 +14,7 @@ import {
   saveSettings,
   setModelAliasIfEmpty
 } from '../lib/settings.js';
-import { localizeDocument, resolveLanguage, t } from '../lib/i18n.js';
+import { localizeDocument, localizeRuntimeError, resolveLanguage, t } from '../lib/i18n.js';
 
 const $ = (id) => document.getElementById(id);
 const sizeInputIds = {
@@ -124,8 +125,7 @@ function refreshSetupProgress() {
     const choice = state.defaults[type];
     const platform = choicePlatform(type);
     const models = type === 'vision' ? platform?.visionModels : platform?.imageModels;
-    const local = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(?=[:/]|$)/i.test(platform?.baseUrl || '');
-    return Boolean(platform?.baseUrl.trim() && (platform?.apiKey.trim() || local) && models?.includes(choice?.model));
+    return Boolean(platform?.baseUrl.trim() && (platform?.apiKey.trim() || allowsEmptyApiKey(platform)) && models?.includes(choice?.model));
   };
   const ready = configuredChoice('vision') && configuredChoice('image');
   setLocalizedText($('setupProgress'), !hasChoices ? '请先启用反推与生图模型。' : ready ? '基础配置已填写，保存后即可尝试。' : '请填写默认模型所用平台的密钥。');
@@ -214,8 +214,7 @@ function appendPlatformNavItem(list, platform) {
   item.className = 'platform-nav-item' + (platform.id === activePlatformId ? ' active' : '');
   item.type = 'button';
   item.dataset.id = platform.id;
-  item.setAttribute('role', 'option');
-  item.setAttribute('aria-selected', String(platform.id === activePlatformId));
+  item.setAttribute('aria-pressed', String(platform.id === activePlatformId));
   const summary = presetLabel(platform.preset);
   item.innerHTML = `
     <span class="platform-nav-main"><b>${esc(platformDisplayName(platform))}</b><small>${esc(summary)}</small></span>
@@ -431,6 +430,12 @@ function bindPlatformCard(card, platform) {
       platform.preset = 'custom';
       return renderPlatforms();
     }
+    if (presetId === platform.preset) {
+      // URL normalization within the same provider must preserve fetched
+      // catalogs, aliases, capability selections, and the user's name.
+      platform.baseUrl = PRESETS[presetId].baseUrl;
+      return renderPlatforms();
+    }
     const preset = PRESETS[presetId];
     platform.preset = presetId;
     platform.name = preset.label;
@@ -459,7 +464,7 @@ function bindPlatformCard(card, platform) {
     e.currentTarget.textContent = ui(input.type === 'password' ? '显示' : '隐藏');
   });
   card.querySelector('.fetch-models').addEventListener('click', async (e) => {
-    if (!platform.baseUrl || (!platform.apiKey && platform.preset !== 'apimart')) {
+    if (!platform.baseUrl || (!platform.apiKey && platform.preset !== 'apimart' && !allowsEmptyApiKey(platform))) {
       showToast(ui('请先填写 Base URL 和 API Key'));
       return;
     }
@@ -532,7 +537,7 @@ function bindPlatformCard(card, platform) {
         : ui('已获取 {total} 个，新增 {added} 个', { total: resp.models?.length || 0, added }));
     } catch (error) {
       if (!isCurrentRequest()) return;
-      platformStatus.set(platform.id, ui('获取失败：{error}', { error: error?.message || error }));
+      platformStatus.set(platform.id, ui('获取失败：{error}', { error: localizeRuntimeError(error, currentLanguage) }));
     } finally {
       const current = isCurrentRequest();
       if (pendingModelFetches.get(platform.id) === request) {

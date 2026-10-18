@@ -60,8 +60,45 @@ function controls() {
   for (const control of [run, verify, restore, diagnose]) control.disabled = busy || !config?.handle;
   restore.disabled = busy || typeof window.showDirectoryPicker !== 'function';
   directory.textContent = config?.handle
-    ? ui('保存目录：{directory} / EchoShot-backup', { directory: config.handle.name })
+    ? (config.handle.name === 'EchoShot-backup'
+      ? ui('保存目录：{directory}', { directory: config.handle.name })
+      : ui('保存目录：{directory} / EchoShot-backup', { directory: config.handle.name }))
     : ui('尚未选择目录');
+}
+
+function confirmRestore() {
+  const dialog = $('localBackupRestoreDialog');
+  const cancel = $('localBackupRestoreCancel');
+  const accept = $('localBackupRestoreConfirm');
+  $('localBackupRestoreTitle').textContent = ui('从备份恢复相册');
+  $('localBackupRestoreDescription').textContent = ui('将从备份恢复缺失的相册和角色库记录，不覆盖现有记录。是否继续？');
+  cancel.textContent = ui('取消');
+  accept.textContent = ui('开始恢复');
+  dialog.returnValue = '';
+  return new Promise((resolve) => {
+    const containFocus = (event) => {
+      if (event.key !== 'Tab') return;
+      if ((!event.shiftKey && document.activeElement === accept) || (event.shiftKey && document.activeElement === cancel)) {
+        event.preventDefault();
+        (event.shiftKey ? accept : cancel).focus();
+      }
+    };
+    dialog.addEventListener('keydown', containFocus);
+    dialog.addEventListener('close', () => {
+      dialog.removeEventListener('keydown', containFocus);
+      resolve(dialog.returnValue === 'restore');
+    }, { once: true });
+    dialog.showModal();
+  });
+}
+
+function backupDiagnostics(result, { includeLegacy = false } = {}) {
+  return [
+    ...(includeLegacy ? [ui('旧版未校验：{count}', { count: result.unverified })] : []),
+    ...(result.sourceWarnings ? [ui('原图缺失或损坏：{count}；成图可正常恢复', { count: result.sourceWarnings })] : []),
+    ...result.errors.slice(0, 3),
+    ...(result.warnings || []).slice(0, 3)
+  ].join('；');
 }
 
 async function refreshCounts() {
@@ -151,7 +188,6 @@ async function runQueuedBackups({ queueAll = false } = {}) {
         total,
         failures
       });
-      await refreshCounts();
     }
     for (const id of characterIds) {
       if (stopped) break;
@@ -175,7 +211,6 @@ async function runQueuedBackups({ queueAll = false } = {}) {
         total,
         failures
       });
-      await refreshCounts();
     }
     const message = stopped
       ? ui('已停止；已备份 {images} 张图片、{characters} 项角色素材，失败 {failed}', { images: completed, characters: characterCompleted, failed: failures })
@@ -248,7 +283,7 @@ verify.addEventListener('click', async () => {
       }
     });
     status.textContent = ui('校验完成：通过 {valid}，损坏或缺失 {failed}，旧版未校验 {unverified}', result);
-    diagnostics.textContent = result.errors.slice(0, 3).join('；');
+    diagnostics.textContent = backupDiagnostics(result);
   } catch (error) {
     status.textContent = error?.name === 'AbortError' ? ui('任务已停止') : ui('校验失败：{error}', { error: error?.message || error });
   } finally {
@@ -260,12 +295,14 @@ verify.addEventListener('click', async () => {
 });
 
 restore.addEventListener('click', async () => {
-  if (busy || !window.confirm(ui('将从备份恢复缺失的相册和角色库记录，不覆盖现有记录。是否继续？'))) return;
+  if (busy) return;
   busy = true;
   controls();
   try {
+    // Open the picker directly from the click, before any asynchronous work or
+    // confirmation. The page dialog can then remain open for any duration.
     const restoreHandle = await window.showDirectoryPicker({ id: 'echoshot-restore', mode: 'read' });
-    busy = true;
+    if (!await confirmRestore()) return;
     abortController = new AbortController();
     stop.hidden = false;
     stop.disabled = false;
@@ -283,15 +320,18 @@ restore.addEventListener('click', async () => {
       skipped: result.skipped,
       failed: result.failed
     });
-    diagnostics.textContent = [ui('旧版未校验：{count}', { count: result.unverified }), ...result.errors.slice(0, 3)].join('；');
+    diagnostics.textContent = backupDiagnostics(result, { includeLegacy: true });
     await refreshCounts();
   } catch (error) {
-    status.textContent = error?.name === 'AbortError' ? ui('任务已停止') : ui('恢复失败：{error}', { error: error?.message || error });
+    status.textContent = error?.name === 'AbortError' ? ui('任务已停止')
+      : error?.name === 'SecurityError' ? ui('无法打开目录选择器，请重新点击“从备份恢复相册”并选择目录。')
+        : ui('恢复失败：{error}', { error: error?.message || error });
   } finally {
     stop.hidden = true;
     abortController = null;
     busy = false;
     controls();
+    restore.focus();
     await refreshCounts().catch(() => {});
   }
 });

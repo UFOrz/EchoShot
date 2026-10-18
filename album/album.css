@@ -591,7 +591,7 @@ body {
   box-shadow: 0 20px 60px rgba(0, 0, 0, .28);
 }
 .confirm-card h2 { margin: 0 0 10px; font-size: 16px; }
-.confirm-card p { margin: 0; color: #666675; line-height: 1.6; }
+.confirm-card p { margin: 0; color: #666675; line-height: 1.6; white-space: pre-line; }
 .confirm-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }
 .btn.danger.solid { color: #fff; border-color: #d5433e; background: #d5433e; }
 .btn.danger.solid:hover { background: #bf3733; }
