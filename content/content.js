@@ -61,6 +61,7 @@
       permission: 'Capture permission is unavailable. Return to the page and try again.',
       unsupported: 'This page cannot be captured. Use a regular HTTP/HTTPS webpage.',
       invalidArea: 'The selected area is invalid. Select it again.',
+      pageChanged: 'The page changed. Return to the source page and select an area again.',
       invalidCrop: 'The cropped screenshot is invalid.'
     },
     ja: {
@@ -73,6 +74,7 @@
       permission: 'キャプチャ権限を使用できません。ページに戻ってもう一度お試しください。',
       unsupported: 'このページはキャプチャできません。通常のHTTP/HTTPSページで使用してください。',
       invalidArea: '選択範囲が無効です。もう一度選択してください。',
+      pageChanged: 'ページが切り替わりました。元のページに戻って範囲を選び直してください。',
       invalidCrop: '切り抜いたスクリーンショットが無効です。'
     },
     ko: {
@@ -85,6 +87,7 @@
       permission: '캡처 권한을 사용할 수 없습니다. 페이지로 돌아가 다시 시도하세요.',
       unsupported: '이 페이지는 캡처할 수 없습니다. 일반 HTTP/HTTPS 웹페이지에서 사용하세요.',
       invalidArea: '선택 영역이 올바르지 않습니다. 다시 선택하세요.',
+      pageChanged: '페이지가 변경되었습니다. 원본 페이지로 돌아가 영역을 다시 선택하세요.',
       invalidCrop: '잘라낸 스크린샷이 올바르지 않습니다.'
     },
     zh: {
@@ -97,6 +100,7 @@
       permission: '当前页面截图权限不可用，请返回网页后重试',
       unsupported: '当前页面不支持截图，请在普通 HTTP/HTTPS 网页中使用',
       invalidArea: '截图区域无效，请重新框选',
+      pageChanged: '页面已切换，请返回来源页面重新框选',
       invalidCrop: '裁切后的截图数据无效'
     }
   };
@@ -113,6 +117,7 @@
     if (/activeTab permission|permission.*(?:capture|active tab)|active tab.*permission/i.test(raw)) return uiText('permission');
     if (/普通 HTTP\/HTTPS|不支持截图|Cannot access|chrome:\/\/|edge:\/\//i.test(raw)) return uiText('unsupported');
     if (/截图区域无效|selected area is invalid/i.test(raw)) return uiText('invalidArea');
+    if (/页面已切换|page changed/i.test(raw)) return uiText('pageChanged');
     if (/裁切后的截图(?:数据|尺寸)无效|cropped screenshot is invalid/i.test(raw)) return uiText('invalidCrop');
     return raw;
   };
@@ -934,7 +939,7 @@
 
     const captureHost = document.createElement('div');
     captureHost.id = 'ir-region-capture-host';
-    captureHost.style.cssText = 'position:fixed;inset:0;z-index:2147483647;pointer-events:auto;';
+    captureHost.style.cssText = 'position:fixed;inset:0;width:100vw;height:100vh;margin:0;padding:0;border:0;max-width:none;max-height:none;overflow:visible;background:transparent;z-index:2147483647;pointer-events:auto;';
     const shadow = captureHost.attachShadow({ mode: 'closed' });
     const style = document.createElement('style');
     style.textContent = `
@@ -949,7 +954,13 @@
     overlay.tabIndex = -1;
     overlay.innerHTML = `<div class="tip">${uiText('capture')}</div><div class="selection"><span class="size"></span></div>`;
     shadow.append(style, overlay);
-    (document.documentElement || document.body).appendChild(captureHost);
+    const modal = document.activeElement?.closest('dialog[open]:modal') ||
+      [...document.querySelectorAll('dialog[open]:modal')].at(-1);
+    (modal || document.documentElement || document.body).appendChild(captureHost);
+    if (modal) {
+      captureHost.setAttribute('popover', 'manual');
+      captureHost.showPopover?.();
+    }
     regionCaptureHost = captureHost;
 
     const selection = overlay.querySelector('.selection');
@@ -960,14 +971,21 @@
 
     const finishCapture = () => {
       if (captureGeneration !== regionCaptureGeneration) return;
+      window.removeEventListener('keydown', onKeyDown, true);
+      modal?.removeEventListener('close', onModalClose);
+      if (regionCaptureCleanup === cleanup) regionCaptureCleanup = null;
       regionCaptureBusy = false;
       refreshMagicButton();
     };
     const captureIsCurrent = () => runtimeIsCurrent() && captureGeneration === regionCaptureGeneration;
-    const cleanup = (resumeMagic = true) => {
-      window.removeEventListener('keydown', onKeyDown, true);
+    const removeSelectionOverlay = () => {
       captureHost.remove();
       if (regionCaptureHost === captureHost) regionCaptureHost = null;
+    };
+    const cleanup = (resumeMagic = true) => {
+      window.removeEventListener('keydown', onKeyDown, true);
+      modal?.removeEventListener('close', onModalClose);
+      removeSelectionOverlay();
       if (regionCaptureCleanup === cleanup) regionCaptureCleanup = null;
       if (resumeMagic) finishCapture();
     };
@@ -977,9 +995,18 @@
       event.preventDefault();
       event.stopPropagation();
       cleanup();
+      regionCaptureGeneration += 1;
       showPageNotice(uiText('cancelled'));
       void chrome.runtime.sendMessage({ type: 'ir.regionCaptureCancelled' }).catch(() => {});
     };
+    const onModalClose = () => {
+      cleanup(false);
+      regionCaptureGeneration += 1;
+      regionCaptureBusy = false;
+      refreshMagicButton();
+      void chrome.runtime.sendMessage({ type: 'ir.regionCaptureCancelled' }).catch(() => {});
+    };
+    modal?.addEventListener('close', onModalClose);
     const selectionRect = (x, y) => ({
       x: Math.min(startX, x),
       y: Math.min(startY, y),
@@ -1021,7 +1048,7 @@
         overlay.querySelector('.tip').textContent = uiText('small');
         return;
       }
-      cleanup(false);
+      removeSelectionOverlay();
       const viewportWidth = window.innerWidth;
       const viewportHeight = window.innerHeight;
       requestAnimationFrame(() => requestAnimationFrame(() => {
@@ -1044,7 +1071,7 @@
               if (!captureIsCurrent()) return;
               return chrome.runtime.sendMessage({
                 type: 'ir.submitRegionCapture',
-                payload: cropped
+                payload: { ...cropped, captureId: response.captureId }
               }, (submitResponse) => {
                 const submitError = chrome.runtime.lastError?.message;
                 if (!captureIsCurrent()) return;

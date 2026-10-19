@@ -107,6 +107,11 @@ async function refreshCounts() {
   return stats;
 }
 
+async function refreshLatestStatus() {
+  const saved = await chrome.storage.local.get(BACKUP_STATUS_KEY);
+  latestStatus = saved[BACKUP_STATUS_KEY] || null;
+}
+
 function formatBytes(value) {
   const bytes = Math.max(0, Number(value) || 0);
   if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
@@ -228,6 +233,7 @@ async function runQueuedBackups({ queueAll = false } = {}) {
     busy = false;
     stop.hidden = true;
     config = await getBackupConfig().catch(() => config);
+    await refreshLatestStatus().catch(() => {});
     controls();
     await refreshCounts().catch(() => {});
   }
@@ -365,8 +371,9 @@ diagnose.addEventListener('click', async () => {
 });
 
 chrome.storage.onChanged.addListener((changes, area) => {
-  if (area === 'local' && changes[BACKUP_STATUS_KEY] && !busy) {
+  if (area === 'local' && changes[BACKUP_STATUS_KEY]) {
     latestStatus = changes[BACKUP_STATUS_KEY].newValue || null;
+    if (busy) return;
     status.textContent = statusText(latestStatus);
     void getBackupConfig().then((next) => { config = next; controls(); }).catch(() => {});
     void refreshCounts().catch(() => {});

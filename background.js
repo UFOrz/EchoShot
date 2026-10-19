@@ -57,6 +57,8 @@ const sourceWriteQueues = new Map();
 const closedWindowIds = new Set();
 const runningJobs = new Map();
 const generationJobQueues = new Map();
+const regionCaptureEpochs = new Map();
+const regionCaptureStates = new Map();
 let surpriseHistoryQueue = Promise.resolve();
 const startupRecovery = recoverInterruptedJobs().then(() => pruneSourceCache({ graceMs: 0 })).catch(() => {});
 void startupRecovery.then(() => resumePendingBackups()).catch(() => {});
@@ -308,10 +310,24 @@ async function broadcastLanguage() {
 chrome.windows?.onRemoved?.addListener((windowId) => {
   closedWindowIds.add(windowId);
   activeSourceRequestIds.delete(windowId);
+  regionCaptureEpochs.delete(windowId);
+  regionCaptureStates.delete(windowId);
   const keys = ['pendingSource', 'panelTask', 'surpriseTask', 'surpriseJob', 'albumAction', 'captureFeedback', 'job', 'reverseJob', 'generationJobs']
     .map((kind) => scopedSessionKey(kind, windowId))
     .filter(Boolean);
   if (keys.length) void chrome.storage.session.remove(keys).then(() => pruneSourceCache()).catch(() => {});
+});
+
+// Tab changes invalidate pixels throughout capture and client-side cropping.
+chrome.tabs.onActivated?.addListener(({ windowId }) => {
+  regionCaptureEpochs.set(windowId, (regionCaptureEpochs.get(windowId) || 0) + 1);
+  regionCaptureStates.delete(windowId);
+});
+chrome.tabs.onUpdated?.addListener((_tabId, change, tab) => {
+  if (!tab?.windowId || (!change.url && change.status !== 'loading')) return;
+  if (regionCaptureStates.get(tab.windowId)?.tabId !== tab.id) return;
+  regionCaptureEpochs.set(tab.windowId, (regionCaptureEpochs.get(tab.windowId) || 0) + 1);
+  regionCaptureStates.delete(tab.windowId);
 });
 
 function setupActionBehavior() {
@@ -579,8 +595,9 @@ async function fetchOriginalSourceBlob(src, timeoutMs = 10000) {
   if (!/^(?:https?:|data:)/i.test(String(src || ''))) return null;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  let response;
   try {
-    const response = await fetch(src, {
+    response = await fetch(src, {
       credentials: 'include',
       signal: controller.signal
     });
@@ -615,7 +632,11 @@ async function fetchOriginalSourceBlob(src, timeoutMs = 10000) {
     if (!/^image\//i.test(blob.type || '') && !/^(?:application\/octet-stream)?$/i.test(blob.type || '')) {
       throw new Error('目标不是图片（' + (blob.type || '未知类型') + '），可能被站点防盗链保护');
     }
-    return normalizeImageMime(blob);
+    return await normalizeImageMime(blob);
+  } catch (error) {
+    controller.abort(error);
+    await response?.body?.cancel().catch(() => {});
+    throw error;
   } finally {
     clearTimeout(timeout);
   }
@@ -821,18 +842,43 @@ async function captureSelectedRegion(payload, tab) {
     throw new Error('截图区域无效，请重新框选');
   }
 
-  const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
-  return { ok: true, dataUrl };
+  const capture = { id: crypto.randomUUID(), tabId: tab.id, windowId: tab.windowId,
+    pageUrl: tab.url || '', epoch: regionCaptureEpochs.get(tab.windowId) || 0 };
+  regionCaptureStates.set(tab.windowId, capture);
+  try {
+    await assertRegionCaptureCurrent(capture);
+    const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
+    await assertRegionCaptureCurrent(capture);
+    return { ok: true, dataUrl, captureId: capture.id };
+  } catch (error) {
+    if (regionCaptureStates.get(tab.windowId) === capture) regionCaptureStates.delete(tab.windowId);
+    throw error;
+  }
+}
+
+async function assertRegionCaptureCurrent(capture) {
+  const [active] = await chrome.tabs.query({ active: true, windowId: capture.windowId });
+  if (regionCaptureStates.get(capture.windowId) !== capture ||
+      (regionCaptureEpochs.get(capture.windowId) || 0) !== capture.epoch ||
+      active?.id !== capture.tabId || (capture.pageUrl && active.url !== capture.pageUrl)) {
+    throw new Error('页面已切换，请返回来源页面重新框选');
+  }
 }
 
 async function submitSelectedRegion(payload, tab) {
   if (!tab?.windowId) throw new Error('未找到需要截图的网页');
+  const capture = regionCaptureStates.get(tab.windowId);
+  if (!capture || capture.id !== payload?.captureId || capture.tabId !== tab.id) {
+    throw new Error('页面已切换，请返回来源页面重新框选');
+  }
+  await assertRegionCaptureCurrent(capture);
   if (!/^data:image\/(png|jpeg|webp);base64,/i.test(payload?.dataUrl || '')) {
     throw new Error('裁切后的截图数据无效');
   }
   const width = Math.round(Number(payload?.width));
   const height = Math.round(Number(payload?.height));
   if (!width || !height) throw new Error('裁切后的截图尺寸无效');
+  regionCaptureStates.delete(tab.windowId);
   await handleSource({
     src: payload.dataUrl,
     dataUrl: payload.dataUrl,

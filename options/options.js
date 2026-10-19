@@ -82,23 +82,96 @@ function settingsSnapshot(settings) {
   return JSON.stringify(canonical(settings));
 }
 
-function mergeSettingsChanges(baseline, edited, latest) {
+function settingsChanged(key, before, after) {
+  return settingsSnapshot({ [key]: before }) !== settingsSnapshot({ [key]: after });
+}
+
+function settingsConflict() {
+  const error = new Error(ui('设置保存冲突：其他页面已修改同一配置，请重新打开设置核对后重试'));
+  error.code = 'SETTINGS_CONFLICT';
+  return error;
+}
+
+function mergePlatformValue(before, edited, latest, key, preferEdited) {
+  if (!settingsChanged(key, before, edited)) return structuredClone(latest);
+  if (!settingsChanged(key, before, latest) || !settingsChanged(key, edited, latest)) return structuredClone(edited);
+  // Model checkboxes are sets. Apply only the local membership changes to the
+  // latest set, so another page's additions or removals remain intact.
+  if ([before, edited, latest].every(value => Array.isArray(value) && value.every(item => typeof item === 'string'))) {
+    const original = new Set(before), selected = new Set(edited), result = new Set(latest);
+    for (const value of original) if (!selected.has(value)) result.delete(value);
+    for (const value of selected) if (!original.has(value)) result.add(value);
+    return [...result];
+  }
+  const object = value => value && typeof value === 'object' && !Array.isArray(value);
+  if (object(edited) && object(latest) && (before === undefined || object(before))) {
+    const result = structuredClone(latest);
+    for (const name of new Set([...Object.keys(before || {}), ...Object.keys(edited)])) {
+      if (!settingsChanged(name, before?.[name], edited[name])) continue;
+      const value = mergePlatformValue(before?.[name], edited[name], latest[name], name, preferEdited);
+      if (value === undefined) delete result[name];
+      else Object.defineProperty(result, name, { value, enumerable: true, configurable: true, writable: true });
+    }
+    return result;
+  }
+  if (preferEdited) return structuredClone(edited);
+  throw settingsConflict();
+}
+
+function mergePlatforms(baseline = [], edited = [], latest = [], preferEdited = false) {
+  const before = new Map(baseline.map(platform => [platform.id, platform]));
+  const local = new Map(edited.map(platform => [platform.id, platform]));
+  const result = structuredClone(latest);
+  for (const platform of baseline) {
+    if (local.has(platform.id)) continue;
+    const index = result.findIndex(item => item.id === platform.id);
+    if (index < 0) continue;
+    if (!preferEdited && settingsChanged('platform', platform, result[index])) throw settingsConflict();
+    result.splice(index, 1);
+  }
+  for (const platform of edited) {
+    const original = before.get(platform.id);
+    const index = result.findIndex(item => item.id === platform.id);
+    if (!original) {
+      if (index < 0) result.push(structuredClone(platform));
+      else if (settingsChanged('platform', platform, result[index])) {
+        if (!preferEdited) throw settingsConflict();
+        result[index] = structuredClone(platform);
+      }
+    } else if (index < 0) {
+      if (!settingsChanged('platform', original, platform)) continue;
+      if (!preferEdited) throw settingsConflict();
+      result.push(structuredClone(platform));
+    } else {
+      result[index] = mergePlatformValue(original, platform, result[index], 'platform', preferEdited);
+    }
+  }
+  return result;
+}
+
+function mergeSettingsChanges(baseline, edited, latest, { preferEdited = false } = {}) {
   const merged = structuredClone(latest);
-  const changed = (key, before, after) =>
-    settingsSnapshot({ [key]: before }) !== settingsSnapshot({ [key]: after });
   for (const [key, value] of Object.entries(edited)) {
     // 默认模型按用途、尺寸映射按比例保存，保留侧边栏更新的其他选择。
-    if (key === 'defaults' || key === 'sizeMap') {
+    if (key === 'platforms') {
+      merged.platforms = mergePlatforms(baseline.platforms, value, latest.platforms, preferEdited);
+    } else if (key === 'defaults' || key === 'sizeMap') {
       for (const [name, item] of Object.entries(value)) {
-        if (changed(name, baseline[key]?.[name], item)) {
+        if (settingsChanged(name, baseline[key]?.[name], item)) {
           merged[key] = { ...merged[key], [name]: structuredClone(item) };
         }
       }
-    } else if (changed(key, baseline[key], value)) {
+    } else if (settingsChanged(key, baseline[key], value)) {
       merged[key] = structuredClone(value);
     }
   }
   return merged;
+}
+
+function withSettingsSaveLock(operation) {
+  return navigator.locks?.request
+    ? navigator.locks.request('echoshot-settings-write', operation)
+    : operation();
 }
 
 function refreshSaveState() {
@@ -784,11 +857,13 @@ $('btnSave').addEventListener('click', async () => {
   try {
     await Promise.allSettled([...pendingWorkflowAliasLookups.values()].map((lookup) => lookup.promise));
     const settings = structuredClone(collectSettings());
-    const merged = mergeSettingsChanges(JSON.parse(savedSnapshot), settings, await loadSettings());
-    await saveSettings(merged);
-    const saved = await loadSettings();
+    const saved = await withSettingsSaveLock(async () => {
+      const merged = mergeSettingsChanges(JSON.parse(savedSnapshot), settings, await loadSettings());
+      await saveSettings(merged);
+      return loadSettings();
+    });
     const savedForm = Object.fromEntries(Object.keys(settings).map((key) => [key, saved[key]]));
-    const current = mergeSettingsChanges(settings, collectSettings(), savedForm);
+    const current = mergeSettingsChanges(settings, collectSettings(), savedForm, { preferEdited: true });
     applySettingsToForm(current, { resetRequests: false, savedSettings: savedForm });
     clearTimeout(savedTagTimer);
     $('savedTag').hidden = dirty;
@@ -821,8 +896,11 @@ $('settingsImportFile').addEventListener('change', async (event) => {
   try {
     const imported = importedSettingsFrom(JSON.parse(await file.text()));
     if (!window.confirm(ui('导入配置将覆盖当前设置，是否继续？'))) return;
-    await saveSettings(imported);
-    applySettingsToForm(await loadSettings());
+    const saved = await withSettingsSaveLock(async () => {
+      await saveSettings(imported);
+      return loadSettings();
+    });
+    applySettingsToForm(saved);
     showToast(ui('配置导入成功'));
   } catch (error) {
     const message = error instanceof SyntaxError ? ui('配置文件不是有效的 JSON') : (error?.message || String(error));

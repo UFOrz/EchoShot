@@ -242,6 +242,10 @@ let dragDepth = 0;
 let droppedImageSeq = 0;
 let sourcePreviewOverride = null;
 let sourceHydrationSeq = 0;
+let sourceOperationSeq = 0;
+let sourceOperationKey = null;
+const localSourceOperations = new Map();
+const pendingSourceCommits = new Set();
 let workspaceSyncQueued = false;
 let surpriseMode = false;
 let surpriseGenerating = false;
@@ -592,61 +596,70 @@ async function handleDroppedImage(file) {
     renderPrivacyRequired();
     throw new Error(ui('请先同意数据使用方式'));
   }
-  const operation = ++droppedImageSeq;
-  showToast(ui('正在读取图片元数据…'));
-  const embeddedMetadata = await readImageGenerationMetadata(file);
-  const prompt = promptFromImageGenerationMetadata(embeddedMetadata);
-  const normalized = await normalizeDroppedImage(file, 2048);
-  if (operation !== droppedImageSeq) return;
-
+  const droppedOperation = ++droppedImageSeq;
   const requestId = crypto.randomUUID();
-  const timestamp = Date.now();
-  const prepared = {
-    requestId,
-    ts: timestamp,
-    status: 'ready',
-    needsReverse: !prompt,
-    embeddedMetadata: Boolean(prompt),
-    metadataSource: prompt ? String(embeddedMetadata?.generatorLabel || embeddedMetadata?.software || '') : '',
-    sourceAssetId: `drop:${requestId}`,
-    src: '',
-    pageUrl: '',
-    pageTitle: file.name || ui('来自拖入的本地图片'),
-    dataUrl: normalized.dataUrl,
-    width: normalized.width,
-    height: normalized.height,
-    mime: normalized.mime
-  };
+  const operation = beginSourceOperation(requestId);
+  try {
+    showToast(ui('正在读取图片元数据…'));
+    const embeddedMetadata = await readImageGenerationMetadata(file);
+    if (!isCurrentSourceOperation(operation)) return;
+    const normalized = await normalizeDroppedImage(file, 2048);
+    const prompt = promptFromImageGenerationMetadata(embeddedMetadata);
+    if (!isCurrentSourceOperation(operation) || droppedOperation !== droppedImageSeq) return;
 
-  if (prompt) {
-    const ratio = String(embeddedMetadata?.ratio || '');
-    const task = {
-      sourceRequestId: requestId,
-      sourceTs: timestamp,
-      prompt,
-      sourcePrompt: prompt,
-      promptZh: '',
-      explanationLanguage: '',
-      ratio: [...els.selRatio.options].some((option) => option.value === ratio)
-        ? ratio
-        : els.selRatio.value,
-      metadataRead: true,
-      metadataSource: prepared.metadataSource,
-      updatedAt: Date.now()
+    const timestamp = Date.now();
+    const prepared = {
+      requestId,
+      ts: timestamp,
+      status: 'ready',
+      needsReverse: !prompt,
+      embeddedMetadata: Boolean(prompt),
+      metadataSource: prompt ? String(embeddedMetadata?.generatorLabel || embeddedMetadata?.software || '') : '',
+      sourceAssetId: `drop:${requestId}`,
+      src: '',
+      pageUrl: '',
+      pageTitle: file.name || ui('来自拖入的本地图片'),
+      dataUrl: normalized.dataUrl,
+      width: normalized.width,
+      height: normalized.height,
+      mime: normalized.mime
     };
-    if (!await commitPanelSource(prepared, task) || operation !== droppedImageSeq) return;
-    applySource(prepared);
-    await restoreTask(prepared);
-    setPromptDoneLabel(true);
-    showToast(prepared.metadataSource
-      ? ui('已从 {source} 元数据读取提示词', { source: prepared.metadataSource })
-      : ui('已读取图片中的提示词'));
-    return;
-  }
 
-  if (!await commitPanelSource(prepared) || operation !== droppedImageSeq) return;
-  applySource(prepared);
-  showToast(ui('图片没有可识别的生成提示词，正在反推'));
+    if (prompt) {
+      const ratio = String(embeddedMetadata?.ratio || '');
+      const task = {
+        sourceRequestId: requestId,
+        sourceTs: timestamp,
+        prompt,
+        sourcePrompt: prompt,
+        promptZh: '',
+        explanationLanguage: '',
+        ratio: [...els.selRatio.options].some((option) => option.value === ratio)
+          ? ratio
+          : els.selRatio.value,
+        metadataRead: true,
+        metadataSource: prepared.metadataSource,
+        updatedAt: Date.now()
+      };
+      if (!await commitPanelSource(prepared, task, operation)) return;
+      applySource(prepared);
+      await restoreTask(prepared);
+      if (!isCurrentSourceOperation(operation)) return;
+      setPromptDoneLabel(true);
+      showToast(prepared.metadataSource
+        ? ui('已从 {source} 元数据读取提示词', { source: prepared.metadataSource })
+        : ui('已读取图片中的提示词'));
+      return;
+    }
+
+    if (!await commitPanelSource(prepared, undefined, operation)) return;
+    applySource(prepared);
+    showToast(ui('图片没有可识别的生成提示词，正在反推'));
+  } catch (error) {
+    if (!isCurrentSourceOperation(operation)) return;
+    abandonSourceOperation(operation);
+    throw error;
+  }
 }
 
 document.addEventListener('dragenter', (event) => {
@@ -812,9 +825,60 @@ function releaseGenerationOwner(owner) {
   return true;
 }
 
-async function commitPanelSource(prepared, task) {
-  const result = await send({ type: 'ir.setSource', payload: { source: prepared, task } });
-  if (!result?.ok && !result?.stale) throw new Error(result?.error || ui('图片读取失败'));
+function beginSourceOperation(requestId) {
+  sourceOperationKey = requestId;
+  const operation = ++sourceOperationSeq;
+  localSourceOperations.set(requestId, operation);
+  return operation;
+}
+
+function isCurrentSourceOperation(operation) {
+  return operation === sourceOperationSeq;
+}
+
+function abandonSourceOperation(operation) {
+  if (!isCurrentSourceOperation(operation)) return;
+  sourceOperationKey = sourceKey(source);
+  sourceOperationSeq += 1;
+  // Keep the current display while waiting to reconcile committed sources.
+  if (localSourceOperations.has(sourceOperationKey)) {
+    localSourceOperations.set(sourceOperationKey, sourceOperationSeq);
+  }
+  const recoveryOperation = sourceOperationSeq;
+  // An earlier submit may have committed while its event was hidden by this
+  // failed selection. Wait for those writes before reading the committed source.
+  void Promise.allSettled([...pendingSourceCommits]).then(async () => {
+    if (!isCurrentSourceOperation(recoveryOperation)) return;
+    await refreshPending({ resumeCommittedSource: true });
+  }).catch(() => {});
+}
+
+function observeSourceOperation(nextSource) {
+  const nextKey = sourceKey(nextSource);
+  if (nextKey !== sourceKey(source) && nextKey !== sourceOperationKey) {
+    sourceOperationKey = nextKey;
+    sourceOperationSeq += 1;
+  }
+}
+
+async function commitPanelSource(prepared, task, operation) {
+  if (operation != null && !isCurrentSourceOperation(operation)) return false;
+  let result;
+  let submission;
+  try {
+    submission = Promise.resolve(send({ type: 'ir.setSource', payload: { source: prepared, task } }));
+    pendingSourceCommits.add(submission);
+    result = await submission;
+  } catch (error) {
+    if (operation != null && !isCurrentSourceOperation(operation)) return false;
+    throw error;
+  } finally {
+    if (submission) pendingSourceCommits.delete(submission);
+  }
+  if (operation != null && !isCurrentSourceOperation(operation)) return false;
+  if (!result?.ok && !result?.stale) {
+    throw new Error(result?.error || ui('图片读取失败'));
+  }
   if (result?.ok) sourceHydrationSeq += 1;
   if (result?.source) Object.assign(prepared, result.source);
   return Boolean(result?.ok);
@@ -942,26 +1006,43 @@ async function consumeNewSourceAndReverse(s) {
 
 // ---------- 来源图片 ----------
 
-async function refreshPending() {
+async function refreshPending({ resumeCommittedSource = false } = {}) {
   const operation = sourceHydrationSeq;
+  const sourceOperation = sourceOperationSeq;
   const expectedKey = sourceKey(source);
-  const current = () => operation === sourceHydrationSeq && sourceKey(source) === expectedKey;
+  const current = () => operation === sourceHydrationSeq && isCurrentSourceOperation(sourceOperation) && sourceKey(source) === expectedKey;
   try {
+    if (resumeCommittedSource && surpriseMode) {
+      const activeSurprise = await getWindowSession('surpriseTask');
+      if (!current()) return;
+      // The ordinary pending image predates this active creation mode. Keep
+      // its live draft unless a later source commit has dismissed that task.
+      if (activeSurprise?.active && activeSurprise.sourceRequestId === expectedKey) return;
+    }
     const resp = await send({ type: 'ir.getPending' });
     if (!current()) return;
-    if (resp?.ok && resp.source) applySource(resp.source);
-    else renderEmpty();
+    if (resp?.ok && resp.source) {
+      if (resumeCommittedSource) {
+        sourceOperationKey = sourceKey(resp.source);
+        if (localSourceOperations.has(sourceOperationKey)) {
+          localSourceOperations.set(sourceOperationKey, sourceOperationSeq);
+        }
+      }
+      applySource(resp.source);
+    } else if (!resumeCommittedSource) renderEmpty();
   } catch (e) {
     if (!current()) return;
+    if (resumeCommittedSource) return;
     renderEmpty();
     showToast(ui('读取图片状态失败：{error}', { error: e?.message || e }));
   }
 }
 
 function renderSurpriseLoading(task = {}) {
-  resetTaskUI();
   const ts = Number(task.sourceTs || task.updatedAt || Date.now());
   const requestId = task.sourceRequestId || `surprise:${crypto.randomUUID()}`;
+  observeSourceOperation({ requestId });
+  resetTaskUI();
   source = { requestId, ts, status: 'loading', surprise: true };
   surpriseMode = true;
   surpriseGenerating = true;
@@ -1000,6 +1081,7 @@ async function renderSurpriseTask(task, { restoreResult = true } = {}) {
   if (!task?.prompt && task?.profile !== 'manual' && !hasReadyDraft) return false;
   const ts = Number(task.sourceTs || task.updatedAt || Date.now());
   const requestId = task.sourceRequestId || `surprise:${crypto.randomUUID()}`;
+  observeSourceOperation({ requestId });
   const preserveVisibleResult =
     surpriseMode &&
     !surpriseGenerating &&
@@ -1045,9 +1127,12 @@ async function renderSurpriseTask(task, { restoreResult = true } = {}) {
 }
 
 async function refreshWorkspace() {
+  const operation = sourceOperationSeq;
   let surpriseTask = await getWindowSession('surpriseTask').catch(() => null);
+  if (!isCurrentSourceOperation(operation)) return;
   if (surpriseTask?.active && surpriseTask.status === 'failed') {
     const pending = await getWindowSession('pendingSource').catch(() => null);
+    if (!isCurrentSourceOperation(operation)) return;
     if (pending && Number(pending.ts) > Number(surpriseTask.sourceTs || 0)) {
       void sendQuietly({ type: 'ir.dismissSurpriseTask', payload: { sourceRequestId: surpriseTask.sourceRequestId } });
       surpriseTask = null;
@@ -1076,6 +1161,7 @@ async function refreshWorkspace() {
 }
 
 function renderSurpriseChoices(task) {
+  observeSourceOperation({ requestId: task.sourceRequestId });
   resetTaskUI();
   source = { requestId: task.sourceRequestId, ts: task.sourceTs, status: 'ready', surprise: true };
   surpriseMode = true;
@@ -1087,6 +1173,7 @@ async function openSurpriseChoices() {
   if (!privacyConsentGranted) { renderPrivacyRequired(); return; }
   if (generating || reversing || surpriseGenerating) return showToast(ui('当前已有生成任务进行中'));
   const task = { active: true, status: 'choice', sourceRequestId: `surprise:${crypto.randomUUID()}`, sourceTs: Date.now() };
+  beginSourceOperation(task.sourceRequestId);
   renderSurpriseChoices(task);
   await writeSurpriseTask(task, true);
 }
@@ -1096,6 +1183,7 @@ async function openManualPrompt() {
   if (generating || reversing || surpriseGenerating) return showToast(ui('当前已有生成任务进行中'));
   const task = { active: true, status: 'ready', profile: 'manual', profileLabel: '手动输入',
     prompt: '', sourceRequestId: `surprise:${crypto.randomUUID()}`, sourceTs: Date.now(), ratio: els.selRatio.value };
+  beginSourceOperation(task.sourceRequestId);
   await renderSurpriseTask(task, { restoreResult: false });
   await writeSurpriseTask(task, true);
   els.taPrompt.focus();
@@ -1121,6 +1209,7 @@ async function createSurprisePrompt() {
     ratio: els.selRatio.value,
     updatedAt: Date.now()
   };
+  beginSourceOperation(task.sourceRequestId);
   renderSurpriseLoading(task);
   if (!await writeSurpriseTask(task, true)) return;
   try {
@@ -1167,6 +1256,7 @@ function renderSourceMeta(s = source) {
 
 function applySource(s) {
   const isNew = sourceKey(source) !== sourceKey(s);
+  observeSourceOperation(s);
   const becameReady = s.status === 'ready' && (isNew || source?.status !== 'ready');
   if (isNew) {
     sourcePreviewOverride = null;
@@ -1236,6 +1326,10 @@ function applySource(s) {
 }
 
 async function applyStoredSource(stored) {
+  const localOperation = localSourceOperations.get(sourceKey(stored));
+  // The session event for an older local commit can arrive while a newer
+  // image is still being decoded. It cannot take ownership from that action.
+  if (localOperation != null && !isCurrentSourceOperation(localOperation)) return;
   const operation = ++sourceHydrationSeq;
   // Consuming needsReverse only updates metadata. Preserve ready pixels while
   // its runtime reply starts reverse; a temporary loading state would skip it.
@@ -1288,7 +1382,7 @@ chrome.storage.session.onChanged.addListener((changes) => {
   const reverseJobChange = changes[windowSessionKey('reverseJob')];
   const surpriseChange = changes[windowSessionKey('surpriseTask')];
   if (pendingChange?.newValue) void applyStoredSource(pendingChange.newValue);
-  if (actionChange?.newValue) void handleAlbumAction().catch((e) => showToast(e?.message || e));
+  if (actionChange?.newValue) void handleAlbumAction(actionChange.newValue).catch((e) => showToast(e?.message || e));
   if (feedbackChange?.newValue) {
     regionCaptureActive = false;
     const feedback = feedbackChange.newValue;
@@ -2341,28 +2435,64 @@ async function generateGroup(requestedCount) {
   }
 }
 
-async function handleAlbumAction() {
-  const albumAction = await getWindowSession('albumAction');
+async function handleAlbumAction(incomingAction) {
+  const observedOperation = sourceOperationSeq;
+  let albumAction;
+  try {
+    albumAction = incomingAction || await getWindowSession('albumAction');
+  } catch (error) {
+    if (!isCurrentSourceOperation(observedOperation)) return;
+    throw error;
+  }
+  if (!isCurrentSourceOperation(observedOperation)) return;
   if (!albumAction?.recordId) return;
-  await removeWindowSession('albumAction');
-  const rec = await getById(albumAction.recordId);
-  if (!rec) return showToast(ui('未找到相册作品'));
-  const normalized = await normalizeImageBlob(rec.blob, 2048, { forceReencode: true });
-  const dataUrl = normalized.dataUrl;
-  const prepared = { requestId: crypto.randomUUID(), ts: Date.now(), status: 'ready', needsReverse: false,
-    src: rec.srcUrl || '', pageUrl: rec.pageUrl || '', pageTitle: '来自 EchoShot · 拍同款相册', dataUrl,
-    width: normalized.width, height: normalized.height, mime: normalized.mime, sourceAssetId: `record:${rec.id}` };
-  if (!await commitPanelSource(prepared)) return;
-  applySource(prepared);
-  els.taPrompt.value = rec.prompt || '';
-  reversedPrompt = rec.sourcePrompt || rec.prompt || '';
-  reversedPromptZh = rec.promptZh || '';
-  reversedPromptLanguage = rec.explanationLanguage || (reversedPromptZh ? 'zh' : '');
-  if ([...els.selRatio.options].some((item) => item.value === rec.ratio)) els.selRatio.value = rec.ratio;
-  updateHints();
-  if (albumAction.action === 'regenerate') await generate();
-  else if (albumAction.action === 'replace') { setReplacePanel(true); await refreshCharacters(); els.secReplace.scrollIntoView({ behavior: 'smooth' }); }
-  else if (albumAction.action === 'group') await generateGroup(Number(albumAction.count || 4));
+  const requestId = crypto.randomUUID();
+  const operation = beginSourceOperation(requestId);
+  try {
+    await removeWindowSession('albumAction');
+    if (!isCurrentSourceOperation(operation)) return;
+    const rec = await getById(albumAction.recordId);
+    if (!isCurrentSourceOperation(operation)) return;
+    if (!rec) {
+      abandonSourceOperation(operation);
+      return showToast(ui('未找到相册作品'));
+    }
+    const normalized = await normalizeImageBlob(rec.blob, 2048, { forceReencode: true });
+    if (!isCurrentSourceOperation(operation)) return;
+    const dataUrl = normalized.dataUrl;
+    const prepared = { requestId, ts: Date.now(), status: 'ready', needsReverse: false,
+      src: rec.srcUrl || '', pageUrl: rec.pageUrl || '', pageTitle: '来自 EchoShot · 拍同款相册', dataUrl,
+      width: normalized.width, height: normalized.height, mime: normalized.mime, sourceAssetId: `record:${rec.id}` };
+    const task = {
+      sourceRequestId: requestId,
+      sourceTs: prepared.ts,
+      prompt: rec.prompt || '',
+      sourcePrompt: rec.sourcePrompt || rec.prompt || '',
+      promptZh: rec.promptZh || '',
+      explanationLanguage: rec.explanationLanguage || (rec.promptZh ? 'zh' : ''),
+      ratio: [...els.selRatio.options].some(item => item.value === rec.ratio) ? rec.ratio : els.selRatio.value,
+      updatedAt: Date.now()
+    };
+    if (!await commitPanelSource(prepared, task, operation)) return;
+    applySource(prepared);
+    els.taPrompt.value = rec.prompt || '';
+    reversedPrompt = rec.sourcePrompt || rec.prompt || '';
+    reversedPromptZh = rec.promptZh || '';
+    reversedPromptLanguage = rec.explanationLanguage || (reversedPromptZh ? 'zh' : '');
+    if ([...els.selRatio.options].some((item) => item.value === rec.ratio)) els.selRatio.value = rec.ratio;
+    updateHints();
+    if (albumAction.action === 'regenerate') await generate();
+    else if (albumAction.action === 'replace') {
+      setReplacePanel(true);
+      await refreshCharacters();
+      if (isCurrentSourceOperation(operation)) els.secReplace.scrollIntoView({ behavior: 'smooth' });
+    } else if (albumAction.action === 'group') await generateGroup(Number(albumAction.count || 4));
+  } catch (error) {
+    if (isCurrentSourceOperation(operation)) {
+      abandonSourceOperation(operation);
+      throw error;
+    }
+  }
 }
 
 async function downloadRecord(record) {
