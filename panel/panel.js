@@ -1,6 +1,6 @@
 // 侧边栏面板：来源图片 → 反推提示词 → 生成同款图片 → 自动存入相册
 
-import { allowsEmptyApiKey, buildModelAliasIndex, imageEditReferenceLimit, listModelChoices, loadSettings, recordModelDisplayName, requiresSourceImage, saveSettings, supportsImageEdit } from '../lib/settings.js';
+import { allowsEmptyApiKey, buildModelAliasIndex, imageEditReferenceLimit, listModelChoices, loadSettings, modelImageSizeError, recordModelDisplayName, requiresSourceImage, resolveModelConfig, saveSettings, supportsImageEdit } from '../lib/settings.js';
 import { getById, getSourceBlob, addCharacter, getCharacters, getCharacterById, removeCharacters } from '../lib/db.js';
 import { detectImageFileType } from '../lib/image-file.js';
 import {
@@ -20,7 +20,7 @@ import {
 } from '../lib/task-state.js';
 import { grantPrivacyConsent, hasPrivacyConsent } from '../lib/privacy.js';
 import { explanationLabel, localizeDocument, localizeRuntimeError, resolveLanguage, t } from '../lib/i18n.js';
-import { blobFromDataUrl, normalizeImageBlob } from '../lib/api.js';
+import { blobFromDataUrl, decodeImageBlob, normalizeImageBlob } from '../lib/api.js';
 import { imageAspectInfo } from '../lib/generation-results.js';
 import { hydrateSource, sourceMetadata } from '../lib/source-store.js';
 
@@ -542,7 +542,7 @@ function blobToDataUrl(blob) {
 }
 
 async function normalizeDroppedImage(blob, maxDimension = 2048) {
-  const bitmap = await createImageBitmap(blob);
+  const bitmap = await decodeImageBlob(blob);
   try {
     const width = bitmap.width;
     const height = bitmap.height;
@@ -1568,6 +1568,14 @@ function updateHints() {
   els.sizeHint.textContent = size ? `${ui('参考尺寸')} ${size}${note}` : '';
   const choice = listModelChoices(settings, 'image').find((item) =>
     choiceValue(item) === els.selImageModel.value);
+  const cfg = choice ? resolveModelConfig(settings, 'image', choice) : null;
+  for (const option of els.selRatio.options) {
+    const error = cfg ? modelImageSizeError(cfg, settings.sizeMap?.[option.value] || '') : '';
+    option.disabled = Boolean(error);
+    option.title = error ? ui(error) : '';
+  }
+  const sizeError = cfg ? modelImageSizeError(cfg, size) : '';
+  if (sizeError) els.sizeHint.textContent = ui(sizeError);
   els.modelHint.textContent = choice ? ui('切换后自动保存为默认模型') : ui('尚未启用生图模型');
   scheduleWorkspaceSync();
 }
@@ -1954,7 +1962,7 @@ function openResultRecordInAlbum(recordId) {
   sendQuietly({ type: 'ir.openAlbum', payload: { recordId } });
 }
 
-function appendResultCard(rec, { reveal = false, persist = true } = {}) {
+function appendResultCard(rec, { reveal = false, persist = true, ownerSourceKey = sourceKey(source) } = {}) {
   if (!rec?.id || !rec?.blob) return null;
   const existing = els.resultList.querySelector(`[data-record-id="${CSS.escape(rec.id)}"]`);
   if (existing) {
@@ -2014,7 +2022,7 @@ function appendResultCard(rec, { reveal = false, persist = true } = {}) {
   regenerate.type = 'button';
   regenerate.dataset.action = 'regenerate';
   regenerate.addEventListener('click', () => {
-    void regenerateRecord(rec).catch((error) => showToast(ui('生成失败：{error}', {
+    void regenerateRecord(rec, ownerSourceKey).catch((error) => showToast(ui('生成失败：{error}', {
       error: error?.message || String(error)
     })));
   });
@@ -2282,7 +2290,7 @@ async function renderGenerationJobsNow(jobs, { restore = false } = {}) {
       const belongsToCurrentSource = matchingCompleted.includes(job);
       const previousResult = lastResult;
       const previousAlbumRecordId = lastAlbumRecordId;
-      newestCard = appendResultCard(record, { persist: false }) || newestCard;
+      newestCard = appendResultCard(record, { persist: false, ownerSourceKey: job.sourceKey }) || newestCard;
       if (!restore && matching.includes(job) && imageAspectInfo(record).mismatch) {
         newMismatchRecord = record;
       }
@@ -2518,15 +2526,16 @@ async function downloadRecord(record) {
   setTimeout(() => URL.revokeObjectURL(url), 10000);
 }
 
-async function regenerateRecord(record) {
+async function regenerateRecord(record, ownerSourceKey) {
   if (!record) return;
   const prompt = String(record.prompt || record.requestPrompt || '').trim();
   if (!prompt) return showToast(ui('缺少原作品提示词'));
 
-  // 重新生成沿用作品保存的原图；没有原图的作品也不能借用当前选中的图片。
+  // 卡片保留原任务的归属，不能用素材 ID 替代，也不能借用点击时的新来源。
+  // 重新生成仍沿用作品保存的原图；没有原图的作品不借用当前选中的图片。
   const sourceBlob = await getSourceBlob(record);
   const originalSource = sourceBlob ? {
-    requestId: record.sourceAssetId || `record:${record.id}`,
+    requestId: ownerSourceKey || record.sourceAssetId || `record:${record.id}`,
     sourceAssetId: record.sourceAssetId || `record:${record.id}`,
     status: 'ready',
     needsReverse: false,
@@ -2557,7 +2566,7 @@ async function regenerateRecord(record) {
   updateHints();
   await generate({
     sourceSnapshot: originalSource,
-    sourceKey: sourceKey(originalSource) || `record:${record.id}`,
+    sourceKey: ownerSourceKey || sourceKey(originalSource) || `record:${record.id}`,
     kind: record.kind,
     surpriseProfile: record.surpriseProfile
   });

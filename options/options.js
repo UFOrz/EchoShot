@@ -318,15 +318,19 @@ function renderPlatformNav() {
   listedPlatforms.forEach((platform) => appendPlatformNavItem(list, platform));
 }
 
-function renderPlatforms() {
+function renderPlatforms({ preserveControls = false } = {}) {
   const listedPlatforms = state.platforms.filter((platform) => platform.listed !== false);
   if (!listedPlatforms.some((platform) => platform.id === activePlatformId)) {
     activePlatformId = listedPlatforms[0]?.id || '';
   }
-  renderPlatformNav();
   const detail = $('platformDetail');
-  detail.innerHTML = '';
   const platform = state.platforms.find((item) => item.id === activePlatformId);
+  const previousCard = detail.querySelector('.platform-card');
+  const retainedCard = preserveControls && previousCard?.dataset.id === platform?.id ? previousCard : null;
+  if (!retainedCard) {
+    renderPlatformNav();
+    detail.innerHTML = '';
+  }
   if (platform) {
     const preset = PRESETS[platform.preset];
     const getKeyUrl = preset?.getKeyUrl || '';
@@ -341,6 +345,28 @@ function renderPlatforms() {
           ${preset.affiliateLink ? `<span class="get-key-disclosure" id="getKeyDisclosure" role="tooltip">${esc(affiliateDisclosure)}</span>` : ''}
         </span>`
       : '';
+    if (retainedCard) {
+      // URL change runs while the pointer is moving focus to the next control.
+      // Keep those inputs/buttons in place so the same click can finish.
+      retainedCard.querySelector('[data-field="name"]').value = platformDisplayName(platform);
+      retainedCard.querySelector('[data-field="baseUrl"]').value = platform.baseUrl;
+      retainedCard.querySelector('.platform-index').textContent = platformDisplayName(platform).slice(0, 1) || 'P';
+      retainedCard.querySelector('.preset-chip').textContent = presetLabel(platform.preset);
+      retainedCard.querySelector('.key-field-label').innerHTML = `<span>API Key</span>${getKeyLink}`;
+      retainedCard.querySelector('.model-list').innerHTML = modelRows(platform);
+      const nav = [...$('platformList').querySelectorAll('.platform-nav-item')].find(item => item.dataset.id === platform.id);
+      if (nav) {
+        nav.querySelector('b').textContent = platformDisplayName(platform);
+        nav.querySelector('small').textContent = presetLabel(platform.preset);
+        const counts = nav.querySelectorAll('.platform-nav-count i');
+        counts[0].textContent = ui('反 {count}', { count: platform.visionModels.length });
+        counts[1].textContent = ui('图 {count}', { count: platform.imageModels.length });
+      }
+      renderDefaults();
+      localizeDocument(currentLanguage);
+      refreshSaveState();
+      return;
+    }
     const card = document.createElement('article');
     card.className = 'platform-card';
     card.dataset.id = platform.id;
@@ -501,13 +527,13 @@ function bindPlatformCard(card, platform) {
         platform.imageEditModels = [];
       }
       platform.preset = 'custom';
-      return renderPlatforms();
+      return renderPlatforms({ preserveControls: true });
     }
     if (presetId === platform.preset) {
       // URL normalization within the same provider must preserve fetched
       // catalogs, aliases, capability selections, and the user's name.
       platform.baseUrl = PRESETS[presetId].baseUrl;
-      return renderPlatforms();
+      return renderPlatforms({ preserveControls: true });
     }
     const preset = PRESETS[presetId];
     platform.preset = presetId;
@@ -525,7 +551,7 @@ function bindPlatformCard(card, platform) {
     platform.visionModels = [...(preset.visionModels || [])];
     platform.imageModels = [...(preset.imageModels || [])];
     platform.imageEditModels = [...(preset.imageEditModels || [])];
-    renderPlatforms();
+    renderPlatforms({ preserveControls: true });
   });
   card.querySelector('.show-disabled-models').addEventListener('change', (e) => {
     state.showDisabledModels = e.target.checked;

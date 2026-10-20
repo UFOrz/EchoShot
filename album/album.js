@@ -1,6 +1,7 @@
 // 相册页：历史生成图片的浏览、搜索、批量下载（ZIP）、批量删除、灯箱详情
 
 import {
+  ALBUM_CHANGE_CHANNEL,
   addCharacterFromAlbumUnique,
   countAll,
   getAllRecordIds,
@@ -125,11 +126,53 @@ let downloadProgressTimer = 0;
 let albumWindowId = null;
 let searchTimer = 0;
 let pageLoadSeq = 0;
+let albumReady = false;
+let albumRefreshPending = false;
+let albumRefreshRunning = false;
+let albumRefreshTimer = 0;
+let albumChanges = null;
 let currentLanguage = 'zh';
 let modelAliasIndex = buildModelAliasIndex({ platforms: [] });
 let masonryLayoutFrame = 0;
 const cardAnimations = new Map();
 const ui = (key, vars = {}) => t(key, vars, currentLanguage);
+
+function scheduleAlbumRefresh() {
+  if (!albumRefreshPending || !albumReady || albumRefreshRunning || albumRefreshTimer
+    || document.hidden || selected.size || currentLbId || confirmResolver || downloadingAll || searchTimer) return;
+  albumRefreshTimer = setTimeout(async () => {
+    albumRefreshTimer = 0;
+    if (document.hidden || selected.size || currentLbId || confirmResolver || downloadingAll || searchTimer) return;
+    albumRefreshPending = false;
+    albumRefreshRunning = true;
+    try {
+      await loadPage(pageOffset, '', { preserveView: true });
+    } catch (error) {
+      showToast(ui('相册读取失败') + '：' + (error?.message || String(error)));
+    } finally {
+      albumRefreshRunning = false;
+      scheduleAlbumRefresh();
+    }
+  }, 150);
+}
+
+function requestAlbumRefresh() {
+  albumRefreshPending = true;
+  scheduleAlbumRefresh();
+}
+
+function connectAlbumChanges() {
+  if (albumChanges) return;
+  albumChanges = new BroadcastChannel(ALBUM_CHANGE_CHANNEL);
+  albumChanges.onmessage = (event) => {
+    if (event.data?.type === 'images-changed') requestAlbumRefresh();
+  };
+}
+connectAlbumChanges();
+window.addEventListener('focus', requestAlbumRefresh);
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) requestAlbumRefresh();
+});
 
 function updateModelAliasIndex(settings) {
   modelAliasIndex = buildModelAliasIndex(settings);
@@ -186,6 +229,7 @@ function closeDeleteConfirmation(accepted) {
   resolve?.(accepted);
   if (confirmReturnFocus?.isConnected) confirmReturnFocus.focus({ preventScroll: true });
   confirmReturnFocus = null;
+  scheduleAlbumRefresh();
 }
 
 async function confirmRecordDeletion(ids, message) {
@@ -533,6 +577,7 @@ function updateSelUI() {
   const allSelected = visibleIds.length > 0 && visibleIds.every((id) => selected.has(id));
   els.btnSelectAll.textContent = t(allSelected ? '取消本页选择' : '选择本页', {}, currentLanguage);
   els.btnSelectAll.setAttribute('aria-pressed', String(allSelected));
+  scheduleAlbumRefresh();
 }
 
 // ---------- 灯箱 ----------
@@ -729,6 +774,7 @@ function closeLightbox() {
   currentLbId = null;
   if (wasOpen && lightboxReturnFocus?.isConnected) lightboxReturnFocus.focus({ preventScroll: true });
   lightboxReturnFocus = null;
+  scheduleAlbumRefresh();
 }
 
 function containDialogFocus(event, dialog) {
@@ -1037,7 +1083,10 @@ els.btnOptions.addEventListener('click', async () => {
 
 els.searchInput.addEventListener('input', () => {
   clearTimeout(searchTimer);
-  searchTimer = setTimeout(() => void loadPageSafely(0), 220);
+  searchTimer = setTimeout(() => {
+    searchTimer = 0;
+    void loadPageSafely(0);
+  }, 220);
 });
 
 els.btnPrevPage.addEventListener('click', () => {
@@ -1162,7 +1211,7 @@ els.confirmBackdrop.addEventListener('click', () => closeDeleteConfirmation(fals
 
 // ---------- 初始化 ----------
 
-async function loadPage(offset = 0, requestedId = '', { animateDeletion = false } = {}) {
+async function loadPage(offset = 0, requestedId = '', { animateDeletion = false, preserveView = false } = {}) {
   const requestSeq = ++pageLoadSeq;
   const query = els.searchInput.value.trim();
   const [{ records: pageRecords, hasMore: nextPage }, total, albumTotal] = await Promise.all([
@@ -1171,6 +1220,12 @@ async function loadPage(offset = 0, requestedId = '', { animateDeletion = false 
     countAll('')
   ]);
   if (requestSeq !== pageLoadSeq) return;
+  if (preserveView && (selected.size || currentLbId || confirmResolver || downloadingAll || searchTimer)) {
+    albumRefreshPending = true;
+    return;
+  }
+  const lastOffset = Math.max(0, (Math.ceil(total / PAGE_SIZE) - 1) * PAGE_SIZE);
+  if (preserveView && offset > lastOffset) return loadPage(lastOffset, '', { preserveView });
   let nextRecords = pageRecords;
   if (requestedId && !nextRecords.some((rec) => rec.id === requestedId)) {
     const requested = await getById(requestedId);
@@ -1178,7 +1233,7 @@ async function loadPage(offset = 0, requestedId = '', { animateDeletion = false 
     if (requested) nextRecords = [requested, ...nextRecords];
   }
   closeLightbox();
-  if (!animateDeletion) {
+  if (!animateDeletion && !preserveView) {
     revokePageUrls();
     selected.clear();
   } else {
@@ -1190,8 +1245,10 @@ async function loadPage(offset = 0, requestedId = '', { animateDeletion = false 
   hasMore = nextPage;
   totalRecords = total;
   totalAlbumRecords = albumTotal;
-  applyFilter({ animate: animateDeletion });
-  if (!animateDeletion) window.scrollTo({ top: 0, behavior: 'auto' });
+  const scrollTop = window.scrollY;
+  applyFilter({ animate: animateDeletion || preserveView });
+  if (!animateDeletion && !preserveView) window.scrollTo({ top: 0, behavior: 'auto' });
+  else if (preserveView) window.scrollTo({ top: scrollTop, behavior: 'auto' });
   if (requestedId && records.some((rec) => rec.id === requestedId)) openLightbox(requestedId);
 }
 
@@ -1240,6 +1297,8 @@ els.btnRetryLoad.addEventListener('click', () => void loadPageSafely(pageOffset)
     albumWindowId = currentWindow?.id;
     const requestedId = new URLSearchParams(location.search).get('open');
     await loadPageSafely(0, requestedId || '');
+    albumReady = true;
+    scheduleAlbumRefresh();
   } catch (error) {
     showAlbumLoadError(error);
   }
@@ -1268,6 +1327,11 @@ window.addEventListener('pagehide', (event) => {
   if (masonryLayoutFrame) cancelAnimationFrame(masonryLayoutFrame);
   masonryLayoutFrame = 0;
   clearTimeout(searchTimer);
+  searchTimer = 0;
+  clearTimeout(albumRefreshTimer);
+  albumRefreshTimer = 0;
+  albumChanges?.close();
+  albumChanges = null;
   clearTimeout(downloadProgressTimer);
   downloadController?.abort();
   revokePageUrls();
@@ -1277,6 +1341,7 @@ window.addEventListener('pageshow', (event) => {
   if (!event.persisted || !restoreAfterPageShow) return;
   restoreAfterPageShow = false;
   topbarObserver.observe(topbar);
+  connectAlbumChanges();
   // Object URLs were revoked on pagehide. Reload persisted records to rebuild
   // thumbnails and comparison URLs when navigating back from the page cache.
   void loadPageSafely(pageOffset);

@@ -4,6 +4,7 @@ import { allowsEmptyApiKey, apiBaseUrlError, imageEditReferenceLimit, isAtlasClo
 import {
   normalizeImageBlob,
   blobFromDataUrl,
+  dataUrlFromBlob,
   reversePromptFromImage,
   generateSurprisePromptWithModel,
   selectSurpriseGenre,
@@ -742,7 +743,25 @@ async function handleSource(payload, windowId, panelOpenPromise = null) {
     if (!blob || !/^image\//i.test(blob.type || '')) {
       throw new Error('目标不是图片（' + (blob?.type || '未知类型') + '），可能被站点防盗链保护');
     }
-    const norm = await normalizeImageBlob(blob, 2048);
+    let norm;
+    try {
+      norm = await normalizeImageBlob(blob, 2048);
+    } catch (decodeError) {
+      if (activeSourceRequestIds.get(windowId) !== requestId) return;
+      if (payload.captureTabId == null) throw decodeError;
+      // SVG can render in a page even when the worker cannot decode it. Reuse
+      // the original bytes for a clean DOM Image if the page canvas is tainted.
+      const captured = await chrome.tabs.sendMessage(payload.captureTabId, {
+        type: 'ir.captureImage',
+        src: payload.src,
+        ...(/^image\/svg\+xml$/i.test(blob.type) ? { svgDataUrl: await dataUrlFromBlob(blob) } : {})
+      }).catch(() => null);
+      if (!captured?.ok || !captured.dataUrl) throw decodeError;
+      if (activeSourceRequestIds.get(windowId) !== requestId) return;
+      norm = await normalizeImageBlob(await blobFromDataUrl(captured.dataUrl), 2048);
+      payload.sourceWidth = captured.width;
+      payload.sourceHeight = captured.height;
+    }
     if (activeSourceRequestIds.get(windowId) !== requestId) return;
     const { previewUrl: _previewUrl, ...settledSource } = pending;
     const prompt = promptFromImageGenerationMetadata(generationMetadata);

@@ -1176,7 +1176,19 @@
       sendResponse({ ok: false, error: '页面中未找到目标图片' });
       return;
     }
-    captureLoadedImg(img)
+    const capture = async () => {
+      try {
+        return await captureLoadedImg(img);
+      } catch (error) {
+        // The worker already fetched this SVG. Loading those bytes locally
+        // avoids tainted cross-origin page pixels and a second image request.
+        if (!/^data:image\/svg\+xml;base64,/i.test(msg.svgDataUrl || '')) throw error;
+        const image = new Image();
+        image.src = msg.svgDataUrl;
+        return captureLoadedImg(image);
+      }
+    };
+    capture()
       .then((captured) => sendResponse({ ok: true, ...captured }))
       .catch((e) => sendResponse({ ok: false, error: e?.message || String(e) }));
     return true;
