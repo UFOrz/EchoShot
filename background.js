@@ -313,7 +313,7 @@ chrome.windows?.onRemoved?.addListener((windowId) => {
   activeSourceRequestIds.delete(windowId);
   regionCaptureEpochs.delete(windowId);
   regionCaptureStates.delete(windowId);
-  const keys = ['pendingSource', 'panelTask', 'surpriseTask', 'surpriseJob', 'albumAction', 'captureFeedback', 'job', 'reverseJob', 'generationJobs']
+  const keys = ['pendingSource', 'panelTask', 'replacementDraft', 'surpriseTask', 'surpriseJob', 'albumAction', 'captureFeedback', 'job', 'reverseJob', 'generationJobs']
     .map((kind) => scopedSessionKey(kind, windowId))
     .filter(Boolean);
   if (keys.length) void chrome.storage.session.remove(keys).then(() => pruneSourceCache()).catch(() => {});
@@ -356,14 +356,51 @@ async function refreshOpenContentScripts() {
     }).catch(() => null)));
 }
 
+let albumOpenQueue = Promise.resolve();
+function waitForAlbumTab(tabId) {
+  return new Promise(resolve => {
+    const finish = () => {
+      clearTimeout(timer);
+      chrome.tabs.onUpdated.removeListener(onUpdated);
+      chrome.tabs.onRemoved.removeListener(onRemoved);
+      resolve();
+    };
+    const onUpdated = (id, change) => { if (id === tabId && change.status === 'complete') finish(); };
+    const onRemoved = id => { if (id === tabId) finish(); };
+    const timer = setTimeout(finish, 5000);
+    chrome.tabs.onUpdated.addListener(onUpdated);
+    chrome.tabs.onRemoved.addListener(onRemoved);
+    void chrome.tabs.get(tabId).then(tab => { if (tab.status === 'complete') finish(); }).catch(finish);
+  });
+}
 function openAlbum(recordId = '') {
-  const query = recordId ? `?open=${encodeURIComponent(recordId)}` : '';
-  chrome.tabs.create({ url: chrome.runtime.getURL(`album/album.html${query}`) });
+  const operation = albumOpenQueue.then(async () => {
+    const albumUrl = chrome.runtime.getURL('album/album.html');
+    // Extension page URLs are not exposed by tabs.query without the tabs permission.
+    const contexts = await chrome.runtime.getContexts({ contextTypes: ['TAB'] });
+    const existing = contexts.find(context => context.tabId >= 0
+      && context.documentUrl?.split(/[?#]/)[0] === albumUrl);
+    if (existing) {
+      const update = { active: true };
+      if (recordId) update.url = `${existing.documentUrl.split('#')[0]}#open=${encodeURIComponent(recordId)}&request=${crypto.randomUUID()}`;
+      const tab = await chrome.tabs.update(existing.tabId, update).catch(() => null);
+      if (tab) {
+        await chrome.windows.update(tab.windowId, { focused: true });
+        return;
+      }
+    }
+    const query = recordId ? `?open=${encodeURIComponent(recordId)}` : '';
+    const tab = await chrome.tabs.create({ url: chrome.runtime.getURL(`album/album.html${query}`) });
+    // Keep following opens queued until getContexts can see the new document.
+    await waitForAlbumTab(tab.id);
+  });
+  albumOpenQueue = operation.catch(() => {});
+  return operation;
 }
 
 chrome.contextMenus.onClicked.addListener((info, tab) => {
   if (info.menuItemId === MENU_ALBUM) {
-    openAlbum();
+    void openAlbum().catch(() => {});
     return;
   }
   if (info.menuItemId === MENU_IMAGE && info.srcUrl) {
@@ -534,7 +571,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         return { ok: true, visible: uiPrefs.magicButtonVisible !== false, language };
       }
       case 'ir.openAlbum':
-        openAlbum(msg.payload?.recordId || '');
+        await openAlbum(msg.payload?.recordId || '');
         return { ok: true };
       case 'ir.openOptions':
         await chrome.runtime.openOptionsPage();

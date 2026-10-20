@@ -189,8 +189,6 @@
       </div>
       <div class="model-hint hint" id="modelHint"></div>
 
-      <div id="genDone" class="done-tag" hidden>✓ 生成成功</div>
-      <div id="genError" class="error" hidden></div>
     </section>
 
     <section id="secReplace" class="card feature-card" hidden>
@@ -206,11 +204,6 @@
         </select>
       </div>
       <details id="replaceAdvanced" class="advanced-instructions"><summary>高级指令</summary><p class="feature-desc">已有默认指令，可按需修改。</p><textarea id="replaceInstruction" rows="8" aria-label="替换角色或者物品提示词"></textarea></details>
-      <div id="replaceProgress" class="loading replace-status" hidden>
-        <span class="spinner"></span><span id="replaceProgressText">正在替换角色或者物品…</span>
-      </div>
-      <div id="replaceDone" class="done-tag replace-status" hidden>✓ 替换成功，已保存到相册</div>
-      <div id="replaceError" class="error replace-status" hidden></div>
     </section>
 
     <section id="secBatch" class="card feature-card" hidden>
@@ -229,9 +222,20 @@
   </main>
   <footer id="actionDock" class="action-dock" aria-label="创作操作" hidden>
     <div id="actionDockSummary" class="dock-summary"></div>
+    <div id="windowJobFeedback" class="loading window-job-feedback" role="status" hidden>
+      <span id="windowJobSpinner" class="spinner" aria-hidden="true"></span><span id="windowJobText"></span>
+      <button id="btnWindowJobAlbum" class="btn mini ghost" type="button" hidden>查看相册</button>
+    </div>
     <div id="genProgress" class="loading" role="status" aria-live="off" aria-label="生图任务进度" hidden>
       <span class="spinner" aria-hidden="true"></span><span id="genText">正在生成，通常需要 10–60 秒…</span>
     </div>
+    <div id="replaceProgress" class="loading" role="status" aria-live="off" hidden>
+      <span class="spinner" aria-hidden="true"></span><span id="replaceProgressText">正在替换角色或者物品…</span>
+    </div>
+    <div id="genDone" class="done-tag" role="status" hidden>✓ 生成成功</div>
+    <div id="replaceDone" class="done-tag" role="status" hidden>✓ 替换成功，已保存到相册</div>
+    <div id="genError" class="error" role="alert" hidden></div>
+    <div id="replaceError" class="error" role="alert" hidden></div>
       <div class="generate-actions">
         <button id="btnGenerate" class="btn primary generate-main">✨ 生成图片</button>
         <button id="btnCancelGroup" class="btn danger group-stop icon-action has-tooltip" type="button" aria-label="停止任务" data-tooltip="停止任务" hidden>

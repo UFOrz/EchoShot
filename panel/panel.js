@@ -205,21 +205,25 @@ let settingsWriteChain = Promise.resolve();
 let taskPersistTimer = 0;
 let privacyConsentGranted = false;
 let actionDockSizeFrame = 0;
+function syncActionDockHeight() {
+  const height = $('actionDock').offsetHeight;
+  const value = `${height}px`;
+  if (height > 0 && document.body.style.getPropertyValue('--action-dock-height') !== value) {
+    document.body.style.setProperty('--action-dock-height', value);
+  }
+}
 const actionDockSizeObserver = new ResizeObserver(() => {
   // 底栏高度会影响主区留白。移出观察器分发阶段，避免回写布局再次触发本轮观察。
   if (actionDockSizeFrame) return;
   actionDockSizeFrame = requestAnimationFrame(() => {
     actionDockSizeFrame = 0;
-    const height = $('actionDock').offsetHeight;
-    const value = `${height}px`;
-    if (height > 0 && document.body.style.getPropertyValue('--action-dock-height') !== value) {
-      document.body.style.setProperty('--action-dock-height', value);
-    }
+    syncActionDockHeight();
   });
 });
 actionDockSizeObserver.observe($('actionDock'));
 let characters = [];
 let selectedCharacterId = '';
+let replacementDraftReady = false;
 let currentWindowId = null;
 const jobPreviewUrls = new Map();
 const renderedJobRecordIds = new Set();
@@ -227,6 +231,11 @@ const resultCardUrls = new Map();
 const resultRecords = new Map();
 let visibleJobState = null;
 let visibleJobTimer = 0;
+let windowJobState = null;
+let windowJobTimer = 0;
+let characterManagerReturnFocus = null;
+let characterPreviewReturnFocus = null;
+const characterDialogInertState = new Map();
 let generationJobsState = [];
 let generationJobsTimer = 0;
 let generationJobsRenderChain = Promise.resolve();
@@ -397,13 +406,17 @@ function scheduleWorkspaceSync() {
 }
 
 function syncWorkspaceChrome() {
+  renderWindowJobFeedback();
   const workspaceVisible = els.secPrivacy.hidden && (!els.secPrompt.hidden || !els.secSource.hidden || !$('surpriseChoices').hidden);
   const promptReady = Boolean(els.taPrompt.value.trim()) && !reversing && !surpriseGenerating;
   const replacing = !els.secReplace.hidden;
   $('workflowSteps').hidden = !workspaceVisible;
-  $('actionDock').hidden = !els.secPrivacy.hidden || (els.secGen.hidden && els.btnCancelGroup.hidden);
+  $('actionDock').hidden = !els.secPrivacy.hidden || (els.secGen.hidden && els.btnCancelGroup.hidden && $('windowJobFeedback').hidden);
   document.body.classList.toggle('has-action-dock', !$('actionDock').hidden);
-  $('actionDockSummary').hidden = !els.genProgress.hidden;
+  $('actionDockSummary').hidden = [els.genProgress, els.replaceProgress,
+    els.genDone, els.replaceDone, els.genError, els.replaceError, $('windowJobFeedback')].some(el => !el.hidden);
+  els.btnGenerate.disabled = generating || windowJobRunning() || activeSingleGenerationCount() >= MAX_CONCURRENT_GENERATION_JOBS;
+  $('btnReplaceGenerate').disabled = generating || windowJobRunning() || activeSingleGenerationCount() > 0;
   els.btnGenerate.hidden = replacing;
   $('btnReplaceGenerate').hidden = !replacing;
   $('replaceToggleLabel').textContent = ui(replacing ? '返回生成' : '替换');
@@ -441,6 +454,8 @@ function syncWorkspaceChrome() {
     return Boolean(models?.includes(selected?.model) && platform && (platform.apiKey || allowsEmptyApiKey(platform)));
   };
   $('firstUseGuide').hidden = configured('vision') && configured('image');
+  // 状态切换会立即改变底栏高度，浮动提示应在同一帧避开底栏。
+  syncActionDockHeight();
 }
 
 function setPromptDoneLabel(fromMetadata = false) {
@@ -485,7 +500,61 @@ function localizedJobStage(stage = '') {
   return ui(stage);
 }
 
+function clearGenerationFeedback() {
+  for (const element of [els.genDone, els.genError, els.replaceDone, els.replaceError]) show(element, false);
+}
+
+function feedbackTimestamp(job) {
+  return Number(job?.finishedAt || job?.updatedAt || job?.startedAt) || 0;
+}
+
+function windowJobRunning() {
+  return windowJobState?.status === 'running';
+}
+
+function setWindowJobState(job) {
+  if (!job || !['group', 'replacement'].includes(job.label)) return;
+  if (windowJobState && Number(windowJobState.startedAt) > Number(job.startedAt)) return;
+  windowJobState = job;
+  clearInterval(windowJobTimer);
+  windowJobTimer = 0;
+  if (windowJobRunning()) windowJobTimer = setInterval(scheduleWorkspaceSync, 1000);
+  generating = Boolean(localGenerationOwner || windowJobRunning());
+  setCancelControls();
+  scheduleWorkspaceSync();
+}
+
+function renderWindowJobFeedback() {
+  const job = windowJobState;
+  const detached = Boolean(job?.sourceKey && sourceKey(source) && job.sourceKey !== sourceKey(source));
+  const running = windowJobRunning();
+  const superseded = generationJobsState.some(single => feedbackTimestamp(single) > feedbackTimestamp(job));
+  const visible = Boolean(job && (running ? detached || !source || job.label === 'group' : detached && !superseded));
+  const row = $('windowJobFeedback');
+  row.hidden = !visible;
+  if (!visible) return;
+  const action = ui(job.label === 'group' ? '组图' : '替换');
+  let text;
+  if (running) {
+    text = job.cancelRequested ? ui('正在停止任务…') : detached
+      ? ui('上一张图片的{action}正在后台进行，已等待 {seconds} 秒…', { action, seconds: Math.max(0, Math.round((Date.now() - job.startedAt) / 1000)) })
+      : ui('正在生成组图，已等待 {seconds} 秒…', { seconds: Math.max(0, Math.round((Date.now() - job.startedAt) / 1000)) });
+  } else if (job.status === 'failed') {
+    text = ui('上一张图片的{action}失败：{error}', { action, error: localizeRuntimeError(job.error || ui('未知错误'), currentLanguage) });
+  } else {
+    text = ui(job.status === 'cancelled' ? '上一张图片的{action}已停止' : '上一张图片的{action}已完成，结果已保存到相册', { action });
+  }
+  row.className = 'window-job-feedback ' + (running ? 'loading' : job.status === 'failed' ? 'error' : 'done-tag');
+  $('windowJobText').textContent = text;
+  $('windowJobSpinner').hidden = !running;
+  $('btnWindowJobAlbum').hidden = running;
+}
+
 function setCancelControls(activeKind = '', cancelRequested = false) {
+  if (windowJobRunning()) {
+    activeKind = windowJobState.label;
+    cancelRequested = Boolean(windowJobState.cancelRequested);
+  }
   show(els.btnCancelGroup, ['group', 'replacement', 'single'].includes(activeKind));
   els.btnCancelGroup.disabled = cancelRequested;
   const label = ui(activeKind === 'single'
@@ -498,7 +567,7 @@ async function cancelGroupJob() {
   els.btnCancelGroup.disabled = true;
   try {
     const singles = generationJobsState.filter(job => job.status === 'running');
-    if (singles.length && !localGenerationOwner) {
+    if (singles.length && !localGenerationOwner && !windowJobRunning()) {
       const responses = await Promise.all(singles.map(job => send({ type: 'ir.generation.cancel', payload: { jobId: job.id } })));
       if (!responses.some(response => response?.ok)) throw new Error(responses[0]?.error || ui('当前没有可停止的生图任务'));
       showToast(ui('已停止本地等待；平台上的任务可能仍在运行'));
@@ -818,9 +887,9 @@ function claimGenerationOwner(job = null) {
 function releaseGenerationOwner(owner) {
   if (owner !== localGenerationOwner) return false;
   localGenerationOwner = null;
-  generating = false;
-  els.btnGenerate.disabled = false;
-  $('btnReplaceGenerate').disabled = false;
+  generating = windowJobRunning();
+  els.btnGenerate.disabled = generating;
+  $('btnReplaceGenerate').disabled = generating;
   setCancelControls('');
   return true;
 }
@@ -1254,6 +1323,14 @@ function renderSourceMeta(s = source) {
   ].filter(Boolean).join(' · ');
 }
 
+function renderSourceStatus(s = source) {
+  if (!s) return;
+  els.srcStatus.textContent = s.status === 'loading' ? ui('正在处理当前页面图片…')
+    : s.status === 'error' ? ui('图片获取失败：{error}', { error: localizeRuntimeError(s.error || ui('未知错误'), currentLanguage) })
+    : ui('原图尺寸 {width}×{height}', { width: s.width, height: s.height });
+  els.srcStatus.classList.toggle('err', s.status === 'error');
+}
+
 function applySource(s) {
   const isNew = sourceKey(source) !== sourceKey(s);
   observeSourceOperation(s);
@@ -1273,6 +1350,7 @@ function applySource(s) {
   show(els.secSource, true);
 
   renderSourceMeta(s);
+  renderSourceStatus(s);
   if (s.status === 'loading') {
     els.srcImg.removeAttribute('src');
     show(els.srcImg, false);
@@ -1291,8 +1369,6 @@ function applySource(s) {
       };
       els.srcImg.src = s.previewUrl;
     }
-    els.srcStatus.textContent = ui('正在处理当前页面图片…');
-    els.srcStatus.classList.remove('err');
     show(els.secPrompt, false);
     show(els.secGen, false);
     show(els.secResult, false);
@@ -1302,8 +1378,6 @@ function applySource(s) {
     els.srcImg.removeAttribute('src');
     show(els.srcImg, false);
     show(els.srcPlaceholder, false);
-    els.srcStatus.textContent = ui('图片获取失败：{error}', { error: s.error || ui('未知错误') });
-    els.srcStatus.classList.add('err');
     show(els.secPrompt, false);
     show(els.secGen, false);
   } else {
@@ -1312,8 +1386,6 @@ function applySource(s) {
     els.srcImg.src = s.dataUrl;
     show(els.srcPlaceholder, false);
     show(els.srcImg, true);
-    els.srcStatus.textContent = ui('原图尺寸 {width}×{height}', { width: s.width, height: s.height });
-    els.srcStatus.classList.remove('err');
     show(els.secPrompt, true);
     show(els.secGen, true);
     show(els.secResult, !!lastResult);
@@ -1349,7 +1421,7 @@ async function applyStoredSource(stored) {
     if (operation === sourceHydrationSeq && sourceKey(source) === sourceKey(stored)) applySource(hydrated);
   } catch (error) {
     if (operation !== sourceHydrationSeq || sourceKey(source) !== sourceKey(stored)) return;
-    applySource({ ...stored, status: 'error', error: localizeRuntimeError(error, currentLanguage) });
+    applySource({ ...stored, status: 'error', error: error?.message || String(error) });
   }
 }
 
@@ -1415,6 +1487,8 @@ chrome.storage.local.onChanged.addListener((changes) => {
     currentLanguage = resolveLanguage(settings.language);
     localizeDocument(currentLanguage);
     renderSourceMeta(source);
+    renderSourceStatus(source);
+    scheduleWorkspaceSync();
     refreshResultCardTranslations();
     if (surpriseMode) {
       els.surpriseProfile.textContent = `${ui(currentSurpriseProfileLabel)} · ${ui('不使用参考图')}`;
@@ -1591,8 +1665,7 @@ function renderGenerationJobsProgress() {
     return;
   }
   if (!localGenerationOwner) setCancelControls('single', active.every(job => job.cancelRequested));
-  show(els.genDone, false);
-  show(els.genError, false);
+  clearGenerationFeedback();
   const oldestStartedAt = Math.min(...active.map((job) => Number(job.startedAt) || Date.now()));
   const seconds = Math.max(0, Math.round((Date.now() - oldestStartedAt) / 1000));
   els.genText.textContent = active.length === 1
@@ -1756,13 +1829,38 @@ async function cancelRegionCaptureFromPanel() {
   }
 }
 
+function persistReplacementDraft() {
+  if (!replacementDraftReady) return Promise.resolve();
+  // 直接提交轻量快照；不依赖页面关闭时仍有机会运行异步回调。
+  return setWindowSession('replacementDraft', {
+    characterId: selectedCharacterId,
+    type: $('replaceType').value,
+    instruction: $('replaceInstruction').value,
+    open: !els.secReplace.hidden
+  }).catch(() => {});
+}
+
+async function restoreReplacementDraft() {
+  const draft = await getWindowSession('replacementDraft');
+  if (draft) {
+    selectedCharacterId = typeof draft.characterId === 'string' ? draft.characterId : '';
+    const type = ['person', 'object', 'clothing'].includes(draft.type) ? draft.type : 'person';
+    $('replaceType').value = type;
+    $('replaceInstruction').value = typeof draft.instruction === 'string'
+      ? draft.instruction : defaultReplaceInstruction(type);
+  }
+  replacementDraftReady = true;
+  return draft;
+}
+
 async function refreshCharacters() {
   const nextCharacters = await getCharacters();
   for (const item of characters) {
     if (item._url) URL.revokeObjectURL(item._url);
   }
   characters = nextCharacters;
-  if (!characters.some((item) => item.id === selectedCharacterId)) selectedCharacterId = characters[0]?.id || '';
+  // 已保存的素材不存在时保留空选中状态，不能静默替换成另一份素材。
+  if (!selectedCharacterId) selectedCharacterId = characters[0]?.id || '';
   renderCharacterManager();
   renderCharacterPicker();
 }
@@ -1800,6 +1898,7 @@ function renderCharacterPicker() {
       }
       selectedCharacterId = item.id;
       renderCharacterPicker();
+      void persistReplacementDraft();
     });
     picker.appendChild(button);
   }
@@ -1830,27 +1929,68 @@ function renderCharacterManager() {
       await removeCharacters([item.id]);
       URL.revokeObjectURL(item._url || '');
       await refreshCharacters();
+      void persistReplacementDraft();
     });
     list.appendChild(card);
   }
 }
 
+function activeCharacterDialog() {
+  return !$('characterPreviewDialog').hidden ? $('characterPreviewDialog')
+    : !$('characterDialog').hidden ? $('characterDialog') : null;
+}
+
+function syncCharacterDialogModalState() {
+  const active = activeCharacterDialog();
+  for (const [element, inert] of characterDialogInertState) element.inert = inert;
+  if (!active) { characterDialogInertState.clear(); return; }
+  for (const element of document.body.children) {
+    if (!characterDialogInertState.has(element)) characterDialogInertState.set(element, element.inert);
+    element.inert = element !== active;
+  }
+}
+
+function restoreCharacterDialogFocus(previous, fallback) {
+  const visible = previous?.isConnected && previous.getClientRects().length
+    && (!previous.checkVisibility || previous.checkVisibility());
+  const target = visible ? previous : fallback;
+  target?.focus({ preventScroll: true });
+}
+
 function openCharacterPreview(item) {
+  characterPreviewReturnFocus = document.activeElement;
   const name = item.name || ui('未命名素材');
   $('characterPreviewImg').src = characterUrl(item);
   $('characterPreviewImg').alt = name;
   $('characterPreviewName').textContent = name;
   $('characterPreviewDialog').hidden = false;
+  syncCharacterDialogModalState();
   queueMicrotask(() => $('characterPreviewClose').focus());
 }
 
 function closeCharacterPreview() {
+  if ($('characterPreviewDialog').hidden) return;
   $('characterPreviewDialog').hidden = true;
   $('characterPreviewImg').removeAttribute('src');
+  syncCharacterDialogModalState();
+  restoreCharacterDialogFocus(characterPreviewReturnFocus, !$('characterDialog').hidden ? $('characterClose') : $('btnHome'));
+  characterPreviewReturnFocus = null;
 }
 
-function openCharacterManager() { $('characterDialog').hidden = false; void refreshCharacters(); }
-function closeCharacterManager() { closeCharacterPreview(); $('characterDialog').hidden = true; }
+function openCharacterManager() {
+  characterManagerReturnFocus = document.activeElement;
+  $('characterDialog').hidden = false;
+  syncCharacterDialogModalState();
+  $('characterClose').focus();
+  void refreshCharacters();
+}
+function closeCharacterManager() {
+  closeCharacterPreview();
+  $('characterDialog').hidden = true;
+  syncCharacterDialogModalState();
+  restoreCharacterDialogFocus(characterManagerReturnFocus, $('moreTools').querySelector('summary'));
+  characterManagerReturnFocus = null;
+}
 
 async function replaceCharacter() {
   if (generating) return showToast(ui('当前已有生成任务进行中'));
@@ -1858,12 +1998,7 @@ async function replaceCharacter() {
     return showToast(ui('请等待单张生图任务完成后再开始组图或替换任务'));
   }
   if (!source?.dataUrl) return showToast(ui('请先选择需要修改的图片'));
-  const character = await getCharacterById(selectedCharacterId);
-  if (!character) return openCharacterManager();
-  const editChoice = replacementEditSelection();
-  if (!editChoice || imageEditReferenceLimit(editChoice) < 2) {
-    return showToast(ui('当前模型最多支持 1 张参考图，无法替换角色或物品；请切换到支持多参考图的模型'));
-  }
+  const characterId = selectedCharacterId;
   const replaceType = ['person', 'object', 'clothing'].includes($('replaceType').value)
     ? $('replaceType').value
     : 'person';
@@ -1874,12 +2009,41 @@ async function replaceCharacter() {
   const promptZhSnapshot = reversedPromptZh;
   const explanationLanguageSnapshot = reversedPromptLanguage;
   const selectionSnapshot = selectedModel(els.selImageModel);
+  const ratio = els.selRatio.value;
+  void persistReplacementDraft();
+  const character = await getCharacterById(characterId);
+  if (!character) {
+    if (characterId) showToast(ui('原替换素材已删除或不可用，请重新选择素材后开始替换'));
+    return openCharacterManager();
+  }
+  if (sourceKey(source) !== sourceKey(sourceSnapshot)) return;
+  return submitReplacement({ character, replaceType, instruction, sourceSnapshot,
+    albumPromptSnapshot, sourcePromptSnapshot, promptZhSnapshot, explanationLanguageSnapshot,
+    selectionSnapshot, ratio });
+}
+
+async function submitReplacement({ character, replaceType, instruction, sourceSnapshot,
+  albumPromptSnapshot, sourcePromptSnapshot, promptZhSnapshot, explanationLanguageSnapshot,
+  selectionSnapshot, ratio }) {
+  if (generating) return showToast(ui('当前已有生成任务进行中'));
+  if (activeSingleGenerationCount()) {
+    return showToast(ui('请等待单张生图任务完成后再开始组图或替换任务'));
+  }
+  const choice = listModelChoices(settings, 'image').find(item => item.platformId === selectionSnapshot.platformId && item.model === selectionSnapshot.model);
+  if (!choice) return showToast(ui('请先在设置中启用并选择生图模型'));
+  if (!supportsImageEdit(choice)) return showToast(ui('当前模型不支持图生图/编辑，请切换到支持图片编辑的模型'));
+  const platform = settings.platforms.find(item => item.id === choice.platformId);
+  if (!platform || !(platform.apiKey || allowsEmptyApiKey(platform))) return showToast(ui('当前平台还没有配置 API Key，请前往设置页填写'));
+  const editChoice = replacementEditSelection(selectionSnapshot);
+  if (imageEditReferenceLimit(editChoice) < 2) return showToast(ui('该模型只支持 1 张参考图，无法同时提交原图和素材'));
+  if (sourceKey(source) === sourceKey(sourceSnapshot)) setReplacePanel(true);
   const button = $('btnReplaceGenerate');
   button.disabled = true;
   const generationOwner = claimGenerationOwner();
   setCancelControls('replacement');
-  show(els.replaceDone, false);
-  show(els.replaceError, false);
+  clearGenerationFeedback();
+  clearTimeout(toastTimer);
+  els.toast.hidden = true;
   show(els.replaceProgress, true);
   els.replaceProgressText.textContent = ui('正在替换角色或者物品…');
   const startedAt = Date.now();
@@ -1892,7 +2056,7 @@ async function replaceCharacter() {
   try {
     const resp = await send({ type: 'ir.job.edit', payload: {
       prompt: instruction,
-      ratio: els.selRatio.value,
+      ratio,
       selection: selectionSnapshot,
       sourceSnapshot,
       // 编辑模型使用内置替换指令；相册继续展示替换前作品的生图提示词。
@@ -2063,9 +2227,9 @@ async function presentSavedResult(resp, label = '生成') {
   showToast(ui('{label}完成，已保存到相册', { label: ui(label) }));
 }
 
-function replacementEditSelection() {
+function replacementEditSelection(selection = selectedModel(els.selImageModel)) {
   const choices = listModelChoices(settings, 'image');
-  const current = selectedModel(els.selImageModel);
+  const current = selection;
   const hasKey = (item) => {
     const platform = settings.platforms.find(platform => platform.id === item.platformId);
     return Boolean(platform && (platform.apiKey || allowsEmptyApiKey(platform)));
@@ -2152,6 +2316,10 @@ function setVisibleJobState(job) {
 
 async function renderBackgroundJob(job, { restore = false } = {}) {
   if (!job) return;
+  if (localGenerationOwner && !localGenerationOwner.jobId && Number(job.startedAt) < localGenerationOwner.startedAt) return;
+  if (windowJobState && Number(windowJobState.startedAt) > Number(job.startedAt)) return;
+  if (job.status !== 'running' && localGenerationOwner?.jobId && localGenerationOwner.jobId !== job.id) return;
+  setWindowJobState(job);
   if (job.sourceKey && job.sourceKey !== sourceKey(source)) {
     if (localGenerationOwner?.jobId === job.id) releaseGenerationOwner(localGenerationOwner);
     return;
@@ -2204,6 +2372,7 @@ async function renderBackgroundJob(job, { restore = false } = {}) {
   setCancelControls(isReplacement && job.status === 'running' ? 'replacement' : '', Boolean(job.cancelRequested));
   if (job.status === 'running') {
     claimGenerationOwner(job);
+    clearGenerationFeedback();
     if (isReplacement) {
       show(els.replaceProgress, true);
       els.replaceProgressText.textContent = ui('{stage}，已等待 {seconds} 秒…', {
@@ -2319,13 +2488,31 @@ async function renderGenerationJobsNow(jobs, { restore = false } = {}) {
     }
   }
 
-  const latestFailure = matching.filter((job) => job.status === 'failed').at(-1);
+  // 两类任务分别存储；重开面板时，较新的替换/组图不能被旧单张失败覆盖。
+  const sourceTerminals = generationJobsState.filter((job) =>
+    job.status !== 'running' && generationJobBelongsToSource(job, source));
+  const otherJob = sourceTerminals.length ? await getWindowSession('job').catch(() => null) : null;
+  if (sourceKey(source) !== expectedSourceKey) return;
+  const hasOtherJob = ['replacement', 'group'].includes(otherJob?.label) &&
+    ['running', 'completed', 'failed', 'cancelled'].includes(otherJob?.status) &&
+    generationJobBelongsToSource(otherJob, source);
+  const latestSingle = [...sourceTerminals].sort((a, b) => feedbackTimestamp(a) - feedbackTimestamp(b)).at(-1);
+  if (hasOtherJob && latestSingle && feedbackTimestamp(latestSingle) > feedbackTimestamp(otherJob)) {
+    show(els.replaceDone, false);
+    show(els.replaceError, false);
+  }
+  const failureCandidates = (restore ? sourceTerminals : matching).filter((job) => job.status === 'failed');
+  const latestFailure = failureCandidates.sort((a, b) => feedbackTimestamp(a) - feedbackTimestamp(b)).at(-1);
   if (latestFailure) {
-    els.genError.textContent = ui('生成失败：{error}', {
-      error: localizeRuntimeError(latestFailure.error || ui('未知错误'), currentLanguage)
-    });
-    show(els.genError, true);
-    if (!restore) showToast(els.genError.textContent);
+    const superseded = hasOtherJob && feedbackTimestamp(otherJob) > feedbackTimestamp(latestFailure);
+    if (!superseded) {
+      clearGenerationFeedback();
+      els.genError.textContent = ui('生成失败：{error}', {
+        error: localizeRuntimeError(latestFailure.error || ui('未知错误'), currentLanguage)
+      });
+      show(els.genError, true);
+      if (!restore) showToast(els.genError.textContent);
+    }
   }
 
   if (!matching.length && !restore) {
@@ -2370,7 +2557,7 @@ async function generateGroup(requestedCount) {
   };
   const generationOwner = claimGenerationOwner();
   show(els.secBatch, true);
-  show(els.genDone, false);
+  clearGenerationFeedback();
   clearJobPreviewUrls();
   clearInterval(visibleJobTimer);
   $('batchResults').innerHTML = '';
@@ -2528,6 +2715,7 @@ async function downloadRecord(record) {
 
 async function regenerateRecord(record, ownerSourceKey) {
   if (!record) return;
+  if (record.kind === 'replacement') return regenerateReplacement(record, ownerSourceKey);
   const prompt = String(record.prompt || record.requestPrompt || '').trim();
   if (!prompt) return showToast(ui('缺少原作品提示词'));
 
@@ -2572,6 +2760,45 @@ async function regenerateRecord(record, ownerSourceKey) {
   });
 }
 
+async function regenerateReplacement(record, ownerSourceKey) {
+  const [sourceBlob, character] = await Promise.all([
+    getSourceBlob(record), getCharacterById(record.characterId || '')
+  ]);
+  if (!sourceBlob) return showToast(ui('原替换图片已不可用，请重新选择图片后开始替换'));
+  if (!character) return showToast(ui('原替换素材已删除或不可用，请重新选择素材后开始替换'));
+  const instruction = String(record.requestPrompt || '').trim();
+  if (!instruction) return showToast(ui('原替换指令缺失，请重新设置后开始替换'));
+  const originalChoice = listModelChoices(settings, 'image').find((choice) =>
+    choice.model === record.model && (
+      (record.platformId && choice.platformId === record.platformId) ||
+      (!record.platformId && choice.platformName === record.provider)
+    ));
+  if (!originalChoice) showToast(ui('原模型当前未启用，将使用当前生图模型重新生成'));
+  const selectionSnapshot = originalChoice
+    ? { platformId: originalChoice.platformId, model: originalChoice.model }
+    : selectedModel(els.selImageModel);
+  return submitReplacement({
+    character,
+    replaceType: ['person', 'object', 'clothing'].includes(record.replacementType) ? record.replacementType : 'person',
+    instruction,
+    sourceSnapshot: {
+      requestId: ownerSourceKey || record.sourceAssetId || `record:${record.id}`,
+      sourceAssetId: record.sourceAssetId || `record:${record.id}`,
+      status: 'ready',
+      needsReverse: false,
+      dataUrl: await blobToDataUrl(sourceBlob),
+      src: record.srcUrl || '',
+      pageUrl: record.pageUrl || ''
+    },
+    albumPromptSnapshot: record.prompt || record.sourcePrompt || instruction,
+    sourcePromptSnapshot: record.sourcePrompt || record.prompt || instruction,
+    promptZhSnapshot: record.promptZh || '',
+    explanationLanguageSnapshot: record.explanationLanguage || (record.promptZh ? 'zh' : ''),
+    selectionSnapshot,
+    ratio: record.ratio || els.selRatio.value
+  });
+}
+
 // ---------- 事件绑定 ----------
 
 els.btnReverse.addEventListener('click', autoReverse);
@@ -2587,6 +2814,7 @@ els.btnCopyPrompt.addEventListener('click', async () => {
 });
 els.btnGenerate.addEventListener('click', () => void generate());
 els.btnCancelGroup.addEventListener('click', cancelGroupJob);
+$('btnWindowJobAlbum').addEventListener('click', () => sendQuietly({ type: 'ir.openAlbum', payload: { recordId: windowJobState?.lastRecordId || windowJobState?.recordIds?.at(-1) || '' } }));
 $('btnCapture').addEventListener('click', capturePage);
 $('btnCapture2').addEventListener('click', capturePage);
 $('btnSurprise').addEventListener('click', openSurpriseChoices);
@@ -2620,7 +2848,9 @@ $('replaceType').addEventListener('change', (event) => {
   $('replaceInstruction').value = defaultReplaceInstruction(event.currentTarget.value);
   show(els.replaceDone, false);
   show(els.replaceError, false);
+  void persistReplacementDraft();
 });
+$('replaceInstruction').addEventListener('input', () => void persistReplacementDraft());
 $('btnShowReplace').addEventListener('click', async () => {
   if (surpriseMode) {
     showToast(ui('惊喜模式没有参考图片，无法替换角色或物品。请先选择一张来源图片。'));
@@ -2632,6 +2862,7 @@ $('btnShowReplace').addEventListener('click', async () => {
     await refreshCharacters();
     els.secReplace.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   }
+  void persistReplacementDraft();
 });
 $('btnReplaceGenerate').addEventListener('click', replaceCharacter);
 $('characterClose').addEventListener('click', closeCharacterManager);
@@ -2639,6 +2870,17 @@ $('characterBackdrop').addEventListener('click', closeCharacterManager);
 $('characterPreviewClose').addEventListener('click', closeCharacterPreview);
 $('characterPreviewBackdrop').addEventListener('click', closeCharacterPreview);
 document.addEventListener('keydown', (event) => {
+  const dialog = activeCharacterDialog();
+  if (event.key === 'Tab' && dialog) {
+    const controls = [...dialog.querySelectorAll('button, input, select, textarea, a[href], [tabindex]')]
+      .filter(element => !element.disabled && element.tabIndex >= 0 && element.getClientRects().length);
+    const first = controls[0], last = controls.at(-1);
+    if (!dialog.contains(document.activeElement) || (event.shiftKey ? document.activeElement === first : document.activeElement === last)) {
+      event.preventDefault();
+      (event.shiftKey ? last : first)?.focus();
+    }
+    return;
+  }
   if (event.key !== 'Escape') return;
   const tools = $('moreTools');
   if (tools.open && tools.contains(document.activeElement)) tools.querySelector('summary').focus();
@@ -2698,7 +2940,9 @@ $('btnEmptyOptions').addEventListener('click', () => sendQuietly({ type: 'ir.ope
 $('btnOptions').addEventListener('click', () => sendQuietly({ type: 'ir.openOptions' }));
 $('btnHome').addEventListener('click', async () => {
   if (!privacyConsentGranted) { renderPrivacyRequired(); return; }
-  if (generating || reversing || surpriseGenerating) return showToast(ui('当前已有生成任务进行中'));
+  if (generating || windowJobRunning() || activeSingleGenerationCount() || reversing || surpriseGenerating || source?.status === 'loading') {
+    return showToast(ui('当前任务尚未完成，请等待完成或停止任务后再返回开始页'));
+  }
   await persistTask();
   renderEmpty();
 });
@@ -2766,6 +3010,7 @@ async function resolvePanelWindowId() {
     const magicActionLabel = ui(magicVisible ? '隐藏魔法按钮' : '显示魔法按钮');
     $('btnMagicToggle').dataset.tooltip = magicActionLabel;
     $('btnMagicToggle').setAttribute('aria-label', magicActionLabel);
+    const replacementDraft = await restoreReplacementDraft();
     privacyConsentGranted = await hasPrivacyConsent();
     if (!privacyConsentGranted) {
       renderPrivacyRequired();
@@ -2773,6 +3018,7 @@ async function resolvePanelWindowId() {
     }
     await refreshWorkspace();
     await refreshCharacters();
+    if (replacementDraft?.open && source?.dataUrl && !surpriseMode) setReplacePanel(true);
     await handleAlbumAction();
     const job = await getWindowSession('job');
     if (job) await renderBackgroundJob(job, { restore: true });
@@ -2785,9 +3031,11 @@ async function resolvePanelWindowId() {
 })();
 
 window.addEventListener('pagehide', () => {
+  void persistReplacementDraft();
   clearTimeout(taskPersistTimer);
   clearInterval(visibleJobTimer);
   clearInterval(generationJobsTimer);
+  clearInterval(windowJobTimer);
   clearInterval(visibleReverseJobTimer);
   void persistTask();
   clearResultCards();

@@ -22,6 +22,7 @@ import { explanationLabel, localizeDocument, resolveLanguage, t } from '../lib/i
 import { buildModelAliasIndex, loadSettings, recordModelDisplayName } from '../lib/settings.js';
 import { blobFromDataUrl, normalizeImageBlob } from '../lib/api.js';
 import { imageAspectInfo } from '../lib/generation-results.js';
+import { getBackupConfig } from '../lib/local-backup.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -234,13 +235,20 @@ function closeDeleteConfirmation(accepted) {
 
 async function confirmRecordDeletion(ids, message) {
   try {
-    // Read the latest backup state, including records outside the visible page.
-    // Backups may be disabled or may have completed since the page was opened.
-    const latest = await getRecordsByIds(ids);
-    const unprotected = latest.filter(rec => !rec.backedUpAt || rec.backupPending || rec.backupError);
-    const warning = unprotected.length
-      ? ui('其中 {count} 张图片尚未成功备份或备份失败，删除可能丢失唯一副本。仍要永久删除吗？', { count: unprotected.length })
-      : '';
+    const [latest, backupConfig] = await Promise.all([getRecordsByIds(ids), getBackupConfig()]);
+    const failed = latest.filter(rec => rec.backupError).length;
+    const pending = latest.filter(rec => !rec.backupError && rec.backupPending).length;
+    const unprotected = latest.filter(rec => !rec.backupError && !rec.backupPending && !rec.backedUpAt).length;
+    const warnings = [];
+    if (failed) warnings.push(ui('其中 {count} 张图片备份失败。', { count: failed }));
+    if (pending) warnings.push(ui('其中 {count} 张图片的备份尚未完成。', { count: pending }));
+    const backupEnabled = Boolean(backupConfig?.enabled && backupConfig.handle);
+    if (unprotected && backupEnabled) warnings.push(ui('其中 {count} 张图片尚无成功备份。', { count: unprotected }));
+    if (warnings.length) {
+      if (!backupEnabled) warnings.push(ui('本地备份当前未启用。'));
+      warnings.push(ui('删除可能丢失这些图片的唯一副本。仍要永久删除吗？'));
+    }
+    const warning = warnings.join('\n');
     return requestDeleteConfirmation(warning ? `${message}\n\n${warning}` : message);
   } catch (error) {
     showToast(ui('删除失败：{error}', { error: error?.message || String(error) }));
@@ -1287,6 +1295,15 @@ async function loadPageSafely(offset = 0, requestedId = '') {
 
 els.btnRetryLoad.addEventListener('click', () => void loadPageSafely(pageOffset));
 
+function requestedRecordId() {
+  return new URLSearchParams(location.hash.slice(1)).get('open')
+    || new URLSearchParams(location.search).get('open') || '';
+}
+
+window.addEventListener('hashchange', () => {
+  if (albumReady && requestedRecordId()) void loadPageSafely(0, requestedRecordId());
+});
+
 (async function init() {
   try {
     const settings = await loadSettings();
@@ -1295,9 +1312,10 @@ els.btnRetryLoad.addEventListener('click', () => void loadPageSafely(pageOffset)
     localizeDocument(currentLanguage);
     const currentWindow = await chrome.windows.getCurrent();
     albumWindowId = currentWindow?.id;
-    const requestedId = new URLSearchParams(location.search).get('open');
+    const requestedId = requestedRecordId();
     await loadPageSafely(0, requestedId || '');
     albumReady = true;
+    if (requestedRecordId() !== requestedId) await loadPageSafely(0, requestedRecordId());
     scheduleAlbumRefresh();
   } catch (error) {
     showAlbumLoadError(error);

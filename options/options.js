@@ -6,6 +6,8 @@ import {
   RATIOS,
   applyRunningHubModelCatalog,
   allowsEmptyApiKey,
+  fallbackModelChoice,
+  isPlatformConfigured,
   isRunningHubPreset,
   listModelChoices,
   loadSettings,
@@ -38,6 +40,13 @@ const platformStatus = new Map();
 const pendingModelFetches = new Map();
 const pendingWorkflowAliasLookups = new Map();
 const ui = (key, vars = {}) => t(key, vars, currentLanguage);
+const platformStatusText = (platformId) => {
+  const status = platformStatus.get(platformId);
+  if (!status) return '';
+  const vars = { ...status.vars };
+  if (status.error != null) vars.error = localizeRuntimeError(status.error, currentLanguage);
+  return ui(status.key, vars);
+};
 const presetLabel = (presetId) => ui(PRESETS[presetId]?.label || '自定义平台');
 const platformDisplayName = (platform) => {
   const originalPresetLabel = PRESETS[platform.preset]?.label;
@@ -198,10 +207,14 @@ function refreshSetupProgress() {
     const choice = state.defaults[type];
     const platform = choicePlatform(type);
     const models = type === 'vision' ? platform?.visionModels : platform?.imageModels;
-    return Boolean(platform?.baseUrl.trim() && (platform?.apiKey.trim() || allowsEmptyApiKey(platform)) && models?.includes(choice?.model));
+    return Boolean(isPlatformConfigured(platform) && models?.includes(choice?.model));
   };
   const ready = configuredChoice('vision') && configuredChoice('image');
-  setLocalizedText($('setupProgress'), !hasChoices ? '请先启用反推与生图模型。' : ready ? '基础配置已填写，保存后即可尝试。' : '请填写默认模型所用平台的密钥。');
+  const missingPlatforms = [...new Set(['vision', 'image'].filter(type => !configuredChoice(type))
+    .map(type => choicePlatform(type)).filter(Boolean).map(platformDisplayName))];
+  setLocalizedText($('setupProgress'), !hasChoices ? '请先启用反推与生图模型。' : ready
+    ? '基础配置已填写，保存后即可尝试。'
+    : '默认模型使用的平台尚未配置：{platforms}。请填写这些平台的 Base URL 与 API Key，或改选已配置平台的默认模型。', { platforms: missingPlatforms.join(', ') });
   $('setupProgress').dataset.ready = String(ready);
 }
 
@@ -293,8 +306,13 @@ function appendPlatformNavItem(list, platform) {
     <span class="platform-nav-main"><b>${esc(platformDisplayName(platform))}</b><small>${esc(summary)}</small></span>
     <span class="platform-nav-count"><i>${esc(ui('反 {count}', { count: platform.visionModels.length }))}</i><i>${esc(ui('图 {count}', { count: platform.imageModels.length }))}</i></span>`;
   item.addEventListener('click', () => {
+    const restoreFocus = document.activeElement === item;
     activePlatformId = platform.id;
     renderPlatforms();
+    if (restoreFocus) {
+      [...$('platformList').querySelectorAll('.platform-nav-item')]
+        .find(button => button.dataset.id === platform.id)?.focus({ preventScroll: true });
+    }
   });
   list.appendChild(item);
 }
@@ -386,7 +404,7 @@ function renderPlatforms({ preserveControls = false } = {}) {
       </div>
       <div class="platform-actions">
         <button class="btn fetch-models" type="button">${esc(ui('自动获取模型'))}</button>
-        <span class="platform-status">${esc(platformStatus.get(platform.id) || '')}</span>
+        <span class="platform-status">${esc(platformStatusText(platform.id))}</span>
       </div>
       <details class="manual-model-details">
         <summary>${esc(ui('手动添加模型（高级）'))}</summary>
@@ -422,12 +440,11 @@ function addModel(platform, model) {
 }
 
 function updatePlatformStatus(platform, message) {
-  const status = ui(message);
-  platformStatus.set(platform.id, status);
+  platformStatus.set(platform.id, { key: message });
   const card = [...$('platformDetail').querySelectorAll('.platform-card')]
     .find((item) => item.dataset.id === platform.id);
   const label = card?.querySelector('.platform-status');
-  if (label) label.textContent = status;
+  if (label) label.textContent = platformStatusText(platform.id);
 }
 
 function platformRequestConfig(platform) {
@@ -573,7 +590,7 @@ function bindPlatformCard(card, platform) {
     const isCurrentRequest = () => pendingModelFetches.get(platform.id) === request
       && platformRequestMatches(platform, request.cfg);
     button.disabled = true;
-    platformStatus.set(platform.id, ui('正在获取…'));
+    platformStatus.set(platform.id, { key: '正在获取…' });
     button.textContent = ui('获取中…');
     try {
       const resp = await chrome.runtime.sendMessage({
@@ -582,7 +599,7 @@ function bindPlatformCard(card, platform) {
         }
       });
       if (!isCurrentRequest()) return;
-      if (!resp?.ok) throw new Error(resp?.error || ui('获取失败'));
+      if (!resp?.ok) throw new Error(resp?.error || '获取失败');
       let added = 0;
       if (platform.preset === 'runninghub_cn') {
         const previousModels = new Set(platform.models);
@@ -627,16 +644,16 @@ function bindPlatformCard(card, platform) {
         );
       }
       platformStatus.set(platform.id, ['runninghub', 'runninghub_cn'].includes(platform.preset)
-        ? ui('已获取 {total} 个（反推 {vision}，生图 {image}），新增 {added} 个', {
+        ? { key: '已获取 {total} 个（反推 {vision}，生图 {image}），新增 {added} 个', vars: {
             total: resp.models?.length || 0,
             vision: resp.visionModels?.length || 0,
             image: resp.imageModels?.length || 0,
             added
-          })
-        : ui('已获取 {total} 个，新增 {added} 个', { total: resp.models?.length || 0, added }));
+          } }
+        : { key: '已获取 {total} 个，新增 {added} 个', vars: { total: resp.models?.length || 0, added } });
     } catch (error) {
       if (!isCurrentRequest()) return;
-      platformStatus.set(platform.id, ui('获取失败：{error}', { error: localizeRuntimeError(error, currentLanguage) }));
+      platformStatus.set(platform.id, { key: '获取失败：{error}', error: error?.message || String(error) });
     } finally {
       const current = isCurrentRequest();
       if (pendingModelFetches.get(platform.id) === request) {
@@ -762,8 +779,9 @@ function renderDefaultSelect(type) {
     : `<option value="">${esc(ui('尚未启用模型'))}</option>`;
   select.disabled = !choices.length;
   if (choices.length && !choices.some((choice) => choiceValue(choice) === current)) {
-    state.defaults[type] = { platformId: choices[0].platformId, model: choices[0].model };
-    select.value = choiceValue(choices[0]);
+    const fallback = fallbackModelChoice(state, type);
+    state.defaults[type] = { platformId: fallback.platformId, model: fallback.model };
+    select.value = choiceValue(fallback);
   }
 }
 
@@ -933,7 +951,14 @@ $('settingsImportFile').addEventListener('change', async (event) => {
     showToast(ui('导入失败：{error}', { error: message }));
   }
 });
-$('btnAlbum').addEventListener('click', () => chrome.tabs.create({ url: chrome.runtime.getURL('album/album.html') }));
+$('btnAlbum').addEventListener('click', async () => {
+  try {
+    const response = await chrome.runtime.sendMessage({ type: 'ir.openAlbum' });
+    if (!response?.ok) throw new Error(response?.error || ui('未知错误'));
+  } catch (error) {
+    showToast(ui('打开相册失败：{error}', { error: localizeRuntimeError(error, currentLanguage) }));
+  }
+});
 
 for (const id of [...Object.values(sizeInputIds), 'defaultRatio', 'imageQuality', 'imageResolution']) {
   $(id).addEventListener('input', refreshSaveState);

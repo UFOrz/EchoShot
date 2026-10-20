@@ -697,7 +697,6 @@ select {
 }
 .feature-card { border-color: #e2dcff; background: linear-gradient(180deg, #fff, #faf8ff); }
 .feature-desc { margin: 0 0 10px; color: #777486; font-size: 12px; line-height: 1.65; }
-.replace-status { margin-top: 8px; }
 .replace-type-row {
   display: grid;
   grid-template-columns: max-content minmax(0, 1fr);
@@ -874,6 +873,11 @@ textarea { font-size: 13px; }
 .dock-summary { overflow: hidden; margin-bottom: 7px; color: #6d647d; font-size: 12px; white-space: nowrap; text-overflow: ellipsis; }
 .action-dock .loading { margin: 0 0 7px; color: #6450bb; font-size: 12px; line-height: 1.45; }
 .action-dock .loading .spinner { flex-shrink: 0; }
+.action-dock .window-job-feedback { display: flex; align-items: center; gap: 7px; }
+.window-job-feedback #windowJobText { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.window-job-feedback .btn { flex-shrink: 0; padding: 5px 7px; font-size: 11px; }
+.action-dock .done-tag { margin: 0 0 7px; font-size: 12px; line-height: 1.45; }
+.action-dock .error { margin: 0 0 7px; max-height: 25vh; overflow-y: auto; font-size: 12px; }
 .action-dock .generate-main { min-height: 42px; }
 .action-dock .replace-toggle { display: flex; flex: 0 0 auto; gap: 5px; width: auto; padding: 8px 10px; font-size: 12px; }
 .action-dock #btnReplaceGenerate { order: -1; }
