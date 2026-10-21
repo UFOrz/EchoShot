@@ -856,7 +856,101 @@ function collectSettings() {
   };
 }
 
-function applySettingsToForm(settings, { resetRequests = true, savedSettings = null } = {}) {
+// `loadSettings()` adds compatibility-only `vision` / `image` fields. They are
+// not part of the form and must not be included when comparing saved state.
+function savedSettingsShape(settings) {
+  const keys = Object.keys(collectSettings());
+  return Object.fromEntries(keys.map((key) => [key, settings?.[key]]));
+}
+
+function transientFocusDescriptor(element) {
+  if (!element || element === document.body || element === document.documentElement) return null;
+  if (element.id) return { id: element.id };
+  if (element.matches?.('.platform-nav-item')) return { kind: 'nav', platformId: element.dataset.id || '' };
+  const card = element.closest?.('.platform-card');
+  if (!card?.dataset.id) return null;
+  const platformId = card.dataset.id;
+  const row = element.closest?.('.model-row');
+  const model = row?.dataset.model || '';
+  if (element.classList?.contains('manual-model')) return { platformId, kind: 'manual' };
+  if (element.classList?.contains('model-alias')) return { platformId, kind: 'alias', model };
+  if (element.matches?.('input[data-capability]')) {
+    return { platformId, kind: 'capability', model, capability: element.dataset.capability || '' };
+  }
+  if (element.dataset?.field) return { platformId, kind: 'field', field: element.dataset.field };
+  const control = [...(element.classList || [])].find((name) => [
+    'model-edit', 'model-remove', 'model-alias-fetch', 'add-model', 'fetch-models',
+    'key-toggle', 'show-disabled-models', 'remove-platform'
+  ].includes(name));
+  return control ? { platformId, kind: 'control', model, control } : null;
+}
+
+function captureTransientControls() {
+  const snapshot = { manual: new Map(), details: new Set(), aliases: new Set(), focus: null };
+  if (!state || !state.platforms) return snapshot;
+  for (const card of $('platformDetail').querySelectorAll('.platform-card')) {
+    const platformId = card.dataset.id;
+    if (!platformId) continue;
+    if (card.querySelector('.manual-model-details')?.open) snapshot.details.add(platformId);
+    const manual = card.querySelector('.manual-model');
+    if (manual?.value) snapshot.manual.set(platformId, manual.value);
+    for (const row of card.querySelectorAll('.model-row')) {
+      const editor = row.querySelector('.model-alias-wrap');
+      if (editor && !editor.hidden) snapshot.aliases.add(`${platformId}\n${row.dataset.model || ''}`);
+    }
+  }
+  snapshot.focus = transientFocusDescriptor(document.activeElement);
+  return snapshot;
+}
+
+function restoreTransientControls(snapshot) {
+  if (!snapshot) return;
+  const cardFor = (platformId) => [...$('platformDetail').querySelectorAll('.platform-card')]
+    .find((card) => card.dataset.id === platformId);
+  for (const platformId of snapshot.details) {
+    const details = cardFor(platformId)?.querySelector('.manual-model-details');
+    if (details) details.open = true;
+  }
+  for (const [platformId, value] of snapshot.manual) {
+    const input = cardFor(platformId)?.querySelector('.manual-model');
+    if (input) input.value = value;
+  }
+  for (const key of snapshot.aliases) {
+    const separator = key.indexOf('\n');
+    const platformId = key.slice(0, separator);
+    const model = key.slice(separator + 1);
+    const row = [...(cardFor(platformId)?.querySelectorAll('.model-row') || [])]
+      .find((item) => item.dataset.model === model);
+    const editor = row?.querySelector('.model-alias-wrap');
+    if (!editor) continue;
+    editor.hidden = false;
+    row.querySelector('.model-edit')?.setAttribute('aria-expanded', 'true');
+  }
+  const focus = snapshot.focus;
+  if (!focus) return;
+  let target = null;
+  if (focus.id) {
+    target = document.getElementById(focus.id);
+  } else if (focus.kind === 'nav') {
+    target = [...$('platformList').querySelectorAll('.platform-nav-item')]
+      .find((item) => item.dataset.id === focus.platformId);
+  } else {
+    const card = cardFor(focus.platformId);
+    const row = [...(card?.querySelectorAll('.model-row') || [])]
+      .find((item) => item.dataset.model === focus.model);
+    if (focus.kind === 'manual') target = card?.querySelector('.manual-model');
+    else if (focus.kind === 'alias') target = row?.querySelector('.model-alias');
+    else if (focus.kind === 'capability') target = row?.querySelector(`input[data-capability="${focus.capability}"]`);
+    else if (focus.kind === 'field') target = card?.querySelector(`[data-field="${focus.field}"]`);
+    else if (focus.kind === 'control') target = row?.querySelector(`.${focus.control}`) || card?.querySelector(`.${focus.control}`);
+  }
+  if (target && !target.disabled && !target.hidden) target.focus({ preventScroll: true });
+}
+
+function applySettingsToForm(settings, { resetRequests = true, savedSettings = null, preservePlatformControls = false } = {}) {
+  const transient = resetRequests ? null : captureTransientControls();
+  const previousPlatformsSnapshot = state ? settingsSnapshot(state.platforms) : '';
+  const previousShowDisabled = state?.showDisabledModels;
   if (resetRequests) {
     // 导入会替换平台对象，旧请求不能参与新配置的去重、保存等待或状态展示。
     pendingModelFetches.clear();
@@ -880,10 +974,17 @@ function applySettingsToForm(settings, { resetRequests = true, savedSettings = n
   $('defaultRatio').value = state.defaultRatio || '1:1';
   $('imageQuality').value = state.imageQuality || 'low';
   $('imageResolution').value = state.imageResolution || '1k';
-  renderPlatforms();
+  const platformControlsUnchanged = !resetRequests
+    && settingsSnapshot(state.platforms) === previousPlatformsSnapshot
+    && state.showDisabledModels === previousShowDisabled;
+  // A background settings refresh should update defaults without throwing away
+  // an unfinished manual-model draft or moving focus while the user is typing.
+  if (preservePlatformControls && platformControlsUnchanged) renderDefaults();
+  else renderPlatforms();
   localizeDocument(currentLanguage);
-  savedSnapshot = settingsSnapshot(savedSettings || collectSettings());
+  savedSnapshot = settingsSnapshot(savedSettings ? savedSettingsShape(savedSettings) : collectSettings());
   refreshSaveState();
+  restoreTransientControls(transient);
 }
 
 chrome.storage.local.onChanged.addListener((changes) => {
@@ -897,7 +998,11 @@ chrome.storage.local.onChanged.addListener((changes) => {
         collectSettings(),
         incoming
       );
-      applySettingsToForm(current, { resetRequests: false, savedSettings: incoming });
+      applySettingsToForm(current, {
+        resetRequests: false,
+        savedSettings: incoming,
+        preservePlatformControls: true
+      });
     } catch {
       // Keep unsaved local edits visible. A later manual save reports real conflicts.
     }
@@ -979,7 +1084,11 @@ $('btnSave').addEventListener('click', async () => {
     });
     const savedForm = Object.fromEntries(Object.keys(settings).map((key) => [key, saved[key]]));
     const current = mergeSettingsChanges(settings, collectSettings(), savedForm, { preferEdited: true });
-    applySettingsToForm(current, { resetRequests: false, savedSettings: savedForm });
+    applySettingsToForm(current, {
+      resetRequests: false,
+      savedSettings: savedForm,
+      preservePlatformControls: true
+    });
     clearTimeout(savedTagTimer);
     $('savedTag').hidden = dirty;
     savedTagTimer = setTimeout(() => ($('savedTag').hidden = true), 2000);
