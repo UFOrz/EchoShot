@@ -12,9 +12,12 @@ import {
   listModelChoices,
   loadSettings,
   modelCapabilityKinds,
+  normalizeRunningHubModel,
   presetIdFromBaseUrl,
+  runningHubAppId,
   saveSettings,
-  setModelAliasIfEmpty
+  setModelAliasIfEmpty,
+  withSettingsWriteLock
 } from '../lib/settings.js';
 import { localizeDocument, localizeRuntimeError, resolveLanguage, t } from '../lib/i18n.js';
 
@@ -36,6 +39,7 @@ let savedSnapshot = null;
 let saving = false;
 let dirty = false;
 let savedTagTimer = 0;
+let externalSettingsRefreshSeq = 0;
 const platformStatus = new Map();
 const pendingModelFetches = new Map();
 const pendingWorkflowAliasLookups = new Map();
@@ -177,12 +181,6 @@ function mergeSettingsChanges(baseline, edited, latest, { preferEdited = false }
   return merged;
 }
 
-function withSettingsSaveLock(operation) {
-  return navigator.locks?.request
-    ? navigator.locks.request('echoshot-settings-write', operation)
-    : operation();
-}
-
 function refreshSaveState() {
   if (!state || savedSnapshot === null) return;
   dirty = settingsSnapshot(collectSettings()) !== savedSnapshot;
@@ -287,8 +285,8 @@ function modelRows(platform) {
       <span class="model-alias-wrap" id="modelAlias-${esc(platform.id)}-${index}" hidden>
         <span class="alias-label">${esc(ui('显示名称'))}</span>
         <input class="model-alias" type="text" value="${esc(alias)}" placeholder="${esc(ui('模型别名（可选）'))}" aria-label="${esc(ui('为 {model} 设置别名', { model }))}" />
-        ${isRunningHubPreset(platform.preset) && /^workflow\/\d+$/.test(model)
-          ? `<button class="model-alias-fetch" type="button" ${alias ? 'hidden' : ''}>${esc(ui('获取名称'))}</button>`
+        ${isRunningHubPreset(platform.preset) && (/^workflow\/\d+$/.test(model) || runningHubAppId(model))
+          ? `<button class="model-alias-fetch" type="button" ${alias && !runningHubAppId(model) ? 'hidden' : ''}>${esc(ui(runningHubAppId(model) ? '读取应用参数' : '获取名称'))}</button>`
           : ''}
       </span>
     </div>`;
@@ -408,7 +406,8 @@ function renderPlatforms({ preserveControls = false } = {}) {
       </div>
       <details class="manual-model-details">
         <summary>${esc(ui('手动添加模型（高级）'))}</summary>
-        <div class="manual-model-editor"><input class="manual-model" placeholder="${esc(ui('手动输入模型名称'))}" aria-label="${esc(ui('模型名称'))}" /><button class="btn add-model" type="button">${esc(ui('添加'))}</button></div>
+        <div class="manual-model-editor"><input class="manual-model" placeholder="${esc(ui(isRunningHubPreset(platform.preset) ? '模型名称、工作流或 AI 应用链接' : '手动输入模型名称'))}" aria-label="${esc(ui('模型名称'))}" /><button class="btn add-model" type="button">${esc(ui('添加'))}</button></div>
+        ${isRunningHubPreset(platform.preset) ? `<p class="hint">${esc(ui('可粘贴 RunningHub 工作流或 AI 应用链接，也可输入 workflow/工作流ID 或 app/应用ID'))}</p>` : ''}
       </details>
       <p class="model-use-hint">${esc(ui('勾选模型用途，再在下方选择默认模型。'))}</p>
       <div class="model-head">
@@ -459,6 +458,7 @@ function platformRequestMatches(platform, cfg) {
 }
 
 function fetchManualWorkflowAlias(platform, model) {
+  if (isRunningHubPreset(platform.preset) && runningHubAppId(model)) return fetchManualRunningHubApp(platform, model);
   if (!isRunningHubPreset(platform.preset) || !/^workflow\/\d+$/.test(model)) return;
   const key = `${platform.id}\n${model}`;
   const pendingLookup = pendingWorkflowAliasLookups.get(key);
@@ -512,6 +512,59 @@ function fetchManualWorkflowAlias(platform, model) {
       if (button?.isConnected) button.disabled = false;
       pendingWorkflowAliasLookups.delete(key);
     }
+  });
+}
+
+function fetchManualRunningHubApp(platform, model) {
+  const key = `${platform.id}\n${model}`;
+  const pending = pendingWorkflowAliasLookups.get(key);
+  if (pending?.platform === platform && platformRequestMatches(platform, pending.cfg)) return;
+  const lookup = { platform, edited: false, promise: null, cfg: platformRequestConfig(platform) };
+  pendingWorkflowAliasLookups.set(key, lookup);
+  updatePlatformStatus(platform, '正在读取 AI 应用参数…');
+  const isCurrent = () => pendingWorkflowAliasLookups.get(key) === lookup
+    && platformRequestMatches(platform, lookup.cfg) && platform.models.includes(model);
+  lookup.promise = (async () => {
+    try {
+      const response = await chrome.runtime.sendMessage({
+        type: 'ir.runningHubAppDescriptor', payload: { preset: lookup.cfg.preset, model }
+      });
+      if (!isCurrent()) return;
+      if (!response?.ok || !response.descriptor) throw new Error(response?.error || '未返回应用信息');
+      const descriptor = response.descriptor;
+      platform.imageCapabilities ||= {};
+      platform.imageCapabilities[model] = { runningHubApp: descriptor };
+      const kinds = modelCapabilityKinds(platform, model);
+      platform.modelKinds ||= {};
+      platform.modelKinds[model] = kinds;
+      platform.imageEditModels = (platform.imageEditModels || []).filter(item => item !== model);
+      if (kinds.includes('image-edit')) platform.imageEditModels.push(model);
+      // 改别名只影响显示名称；应用能力和参数仍须保存。
+      if (!lookup.edited) setModelAliasIfEmpty(platform, model, descriptor.name);
+      const card = [...$('platformDetail').querySelectorAll('.platform-card')].find(item => item.dataset.id === platform.id);
+      const row = [...(card?.querySelectorAll('.model-row') || [])].find(item => item.dataset.model === model);
+      if (row) {
+        const aliasInput = row.querySelector('.model-alias');
+        if (aliasInput && !lookup.edited) aliasInput.value = platform.modelAliases?.[model] || '';
+        updateModelIdentity(row, platform, model);
+        const preview = document.createElement('div');
+        preview.innerHTML = modelRows({ ...platform, models: [model] });
+        const badges = preview.querySelector('.model-kind-badges');
+        row.querySelector('.model-kind-badges')?.remove();
+        if (badges) row.querySelector('.model-identity').prepend(badges);
+      }
+      updatePlatformStatus(platform, '已读取 AI 应用参数，请勾选生图并保存');
+      renderDefaults();
+      refreshSaveState();
+    } catch (error) {
+      if (!isCurrent()) return;
+      platformStatus.set(platform.id, { key: '获取失败：{error}', error: error?.message || String(error) });
+      const label = [...$('platformDetail').querySelectorAll('.platform-card')]
+        .find(item => item.dataset.id === platform.id)?.querySelector('.platform-status');
+      if (label) label.textContent = platformStatusText(platform.id);
+    }
+  })().finally(() => {
+    if (pendingWorkflowAliasLookups.get(key) === lookup) pendingWorkflowAliasLookups.delete(key);
   });
 }
 
@@ -668,16 +721,16 @@ function bindPlatformCard(card, platform) {
   });
   card.querySelector('.add-model').addEventListener('click', () => {
     const input = card.querySelector('.manual-model');
-    const model = input.value.trim();
+    const model = isRunningHubPreset(platform.preset) ? normalizeRunningHubModel(input.value) : input.value.trim();
     if (!model) return showToast(ui('请输入新的模型名称'));
     if (!addModel(platform, model)) {
-      if (isRunningHubPreset(platform.preset) && /^workflow\/\d+$/.test(model)
-        && !String(platform.modelAliases?.[model] || '').trim()) {
+      if (isRunningHubPreset(platform.preset) && (runningHubAppId(model) || /^workflow\/\d+$/.test(model))) {
         if (!state.showDisabledModels) {
           state.showDisabledModels = true;
           renderPlatforms();
         }
         fetchManualWorkflowAlias(platform, model);
+        showToast(ui('模型已在列表中'));
         return;
       }
       return showToast(ui('模型已在列表中'));
@@ -718,7 +771,7 @@ function bindPlatformCard(card, platform) {
     if (alias) platform.modelAliases[model] = alias;
     else delete platform.modelAliases[model];
     const aliasButton = e.target.closest('.model-row')?.querySelector('.model-alias-fetch');
-    if (aliasButton) aliasButton.hidden = Boolean(alias);
+    if (aliasButton) aliasButton.hidden = Boolean(alias) && !runningHubAppId(model);
     updateModelIdentity(e.target.closest('.model-row'), platform, model);
     renderDefaults();
     refreshSaveState();
@@ -833,6 +886,24 @@ function applySettingsToForm(settings, { resetRequests = true, savedSettings = n
   refreshSaveState();
 }
 
+chrome.storage.local.onChanged.addListener((changes) => {
+  if (!changes.settings || saving || !state || savedSnapshot === null) return;
+  const seq = ++externalSettingsRefreshSeq;
+  void loadSettings().then((incoming) => {
+    if (seq !== externalSettingsRefreshSeq || saving || !state) return;
+    try {
+      const current = mergeSettingsChanges(
+        JSON.parse(savedSnapshot),
+        collectSettings(),
+        incoming
+      );
+      applySettingsToForm(current, { resetRequests: false, savedSettings: incoming });
+    } catch {
+      // Keep unsaved local edits visible. A later manual save reports real conflicts.
+    }
+  }).catch(() => {});
+});
+
 function settingsExportName() {
   const date = new Date();
   const pad = (value) => String(value).padStart(2, '0');
@@ -901,7 +972,7 @@ $('btnSave').addEventListener('click', async () => {
   try {
     await Promise.allSettled([...pendingWorkflowAliasLookups.values()].map((lookup) => lookup.promise));
     const settings = structuredClone(collectSettings());
-    const saved = await withSettingsSaveLock(async () => {
+    const saved = await withSettingsWriteLock(async () => {
       const merged = mergeSettingsChanges(JSON.parse(savedSnapshot), settings, await loadSettings());
       await saveSettings(merged);
       return loadSettings();
@@ -940,7 +1011,7 @@ $('settingsImportFile').addEventListener('change', async (event) => {
   try {
     const imported = importedSettingsFrom(JSON.parse(await file.text()));
     if (!window.confirm(ui('导入配置将覆盖当前设置，是否继续？'))) return;
-    const saved = await withSettingsSaveLock(async () => {
+    const saved = await withSettingsWriteLock(async () => {
       await saveSettings(imported);
       return loadSettings();
     });

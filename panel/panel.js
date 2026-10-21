@@ -1,6 +1,6 @@
 // 侧边栏面板：来源图片 → 反推提示词 → 生成同款图片 → 自动存入相册
 
-import { allowsEmptyApiKey, buildModelAliasIndex, imageEditReferenceLimit, listModelChoices, loadSettings, modelImageSizeError, recordModelDisplayName, requiresSourceImage, resolveModelConfig, saveSettings, supportsImageEdit } from '../lib/settings.js';
+import { allowsEmptyApiKey, buildModelAliasIndex, imageEditReferenceLimit, listModelChoices, loadSettings, modelImageSizeError, recordModelDisplayName, requiresSourceImage, resolveModelConfig, saveSettings, supportsImageEdit, withSettingsWriteLock } from '../lib/settings.js';
 import { getById, getSourceBlob, addCharacter, getCharacters, getCharacterById, removeCharacters } from '../lib/db.js';
 import { detectImageFileType } from '../lib/image-file.js';
 import {
@@ -321,10 +321,12 @@ function saveDefaultModel(type, select) {
     defaults: { ...(settings?.defaults || {}), [type]: selection }
   };
   settingsWriteChain = settingsWriteChain.then(async () => {
-    const latest = await loadSettings();
-    latest.defaults = { ...(latest.defaults || {}), [type]: selection };
-    await saveSettings(latest);
-    settings = latest;
+    await withSettingsWriteLock(async () => {
+      const latest = await loadSettings();
+      latest.defaults = { ...(latest.defaults || {}), [type]: selection };
+      await saveSettings(latest);
+      settings = latest;
+    });
   }).then(() => {
     showToast(ui(appliesToNextSurprise
       ? '已保存为默认反推模型，将在下次惊喜生成时生效'
@@ -340,10 +342,12 @@ function saveDefaultRatio(ratio) {
   if (!value || settings?.defaultRatio === value) return settingsWriteChain;
   settings = { ...settings, defaultRatio: value };
   settingsWriteChain = settingsWriteChain.then(async () => {
-    const latest = await loadSettings();
-    latest.defaultRatio = value;
-    await saveSettings(latest);
-    settings = latest;
+    await withSettingsWriteLock(async () => {
+      const latest = await loadSettings();
+      latest.defaultRatio = value;
+      await saveSettings(latest);
+      settings = latest;
+    });
   }).then(() => {
     showToast(ui('已设为默认比例'));
   }).catch((error) => {

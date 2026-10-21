@@ -23,6 +23,7 @@ import {
   generateAtlasCloudImageEdit,
   generateRunningHubImage,
   generateRunningHubWorkflowImage,
+  generateRunningHubAppImage,
   generateAgnesImageEdit,
   generateModelScopeImageEdit,
   generateZenMuxImageEdit,
@@ -34,6 +35,7 @@ import {
   listFalModels,
   listRunningHubModels,
   fetchRunningHubWorkflowTitle,
+  fetchRunningHubAppDescriptor,
   testConnection
 } from './lib/api.js';
 import { hasPrivacyConsent } from './lib/privacy.js';
@@ -597,6 +599,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           ok: true,
           title: await fetchRunningHubWorkflowTitle(msg.payload?.preset, msg.payload?.model)
         };
+      case 'ir.runningHubAppDescriptor':
+        return {
+          ok: true,
+          descriptor: await fetchRunningHubAppDescriptor({ preset: msg.payload?.preset, model: msg.payload?.model })
+        };
       default:
         return { ok: false, error: '未知消息类型' };
     }
@@ -1138,6 +1145,8 @@ async function doGenerate({ prompt, ratio, selection, sourceRequestId, sourceTs,
       sourceDataUrl: '',
       resolution
     });
+  } else if (cfg.apiType === 'runninghub-app-v2') {
+    r = await generateRunningHubAppImage({ cfg, prompt: prompt.trim(), ratio, size });
   } else if (cfg.apiType === 'runninghub-workflow-v2') {
     r = await generateRunningHubWorkflowImage({
       cfg,
@@ -1262,6 +1271,8 @@ async function doEdit({ prompt, ratio, selection, sourceDataUrl, referenceDataUr
       return { ok: false, error: '该 RunningHUB 模型不支持双图参考，请选择支持至少两张图片的模型' };
     }
     r = await generateRunningHubImage({ cfg, prompt: prompt.trim(), ratio, size, sourceDataUrl, referenceDataUrl, resolution });
+  } else if (cfg.apiType === 'runninghub-app-v2') {
+    r = await generateRunningHubAppImage({ cfg, prompt: prompt.trim(), ratio, size, sourceDataUrl, referenceDataUrl });
   } else if (cfg.apiType === 'runninghub-workflow-v2') {
     return { ok: false, error: '当前 RunningHUB 工作流不支持角色替换，请选择图生图或 edit 模型' };
   } else if (cfg.preset === 'modelscope') {
