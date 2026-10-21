@@ -1325,15 +1325,30 @@ window.addEventListener('hashchange', () => {
 chrome.storage.local.onChanged.addListener((changes) => {
   if (!changes.settings) return;
   void loadSettings().then((settings) => {
-    currentLanguage = resolveLanguage(settings.language);
-    updateModelAliasIndex(settings);
+    const nextLanguage = resolveLanguage(settings.language);
+    const nextAliases = buildModelAliasIndex(settings);
+    const languageChanged = nextLanguage !== currentLanguage;
+    const aliasesChanged = Object.keys(nextAliases).some((key) => {
+      const previous = modelAliasIndex[key];
+      const next = nextAliases[key];
+      return previous.size !== next.size || [...next].some(([model, alias]) => previous.get(model) !== alias);
+    });
+    currentLanguage = nextLanguage;
+    modelAliasIndex = nextAliases;
+    // Saving a default model/ratio does not change album content or browsing state.
+    if (!languageChanged && !aliasesChanged) return;
     localizeDocument(currentLanguage);
-    if (els.searchInput.value.trim()) {
-      void loadPageSafely(0);
-    } else {
-      renderGrid();
-      if (currentLbId) openLightbox(currentLbId);
+    renderGrid();
+    if (currentLbId) {
+      if (languageChanged) openLightbox(currentLbId);
+      else {
+        const rec = records.find(item => item.id === currentLbId);
+        if (rec) els.lbModel.textContent = displayedRecordModel(rec) || '-';
+      }
     }
+    // An alias may change search matches. Defer requerying while selecting or
+    // previewing, and retain the current page/scroll when it is safe to refresh.
+    if (aliasesChanged && els.searchInput.value.trim()) requestAlbumRefresh();
   });
 });
 

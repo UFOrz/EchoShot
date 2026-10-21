@@ -716,7 +716,11 @@ function bindPlatformCard(card, platform) {
           button.textContent = ui('自动获取模型');
         }
       }
-      if (current) renderPlatforms();
+      if (current) {
+        const transient = captureTransientControls();
+        renderPlatforms();
+        restoreTransientControls(transient);
+      }
     }
   });
   card.querySelector('.add-model').addEventListener('click', () => {
@@ -900,6 +904,10 @@ function captureTransientControls() {
     }
   }
   snapshot.focus = transientFocusDescriptor(document.activeElement);
+  if (snapshot.focus && typeof document.activeElement?.selectionStart === 'number') {
+    snapshot.focus.selection = [document.activeElement.selectionStart,
+      document.activeElement.selectionEnd, document.activeElement.selectionDirection];
+  }
   return snapshot;
 }
 
@@ -944,7 +952,12 @@ function restoreTransientControls(snapshot) {
     else if (focus.kind === 'field') target = card?.querySelector(`[data-field="${focus.field}"]`);
     else if (focus.kind === 'control') target = row?.querySelector(`.${focus.control}`) || card?.querySelector(`.${focus.control}`);
   }
-  if (target && !target.disabled && !target.hidden) target.focus({ preventScroll: true });
+  if (target && !target.disabled && !target.hidden) {
+    target.focus({ preventScroll: true });
+    if (focus.selection && typeof target.setSelectionRange === 'function') {
+      target.setSelectionRange(...focus.selection);
+    }
+  }
 }
 
 function applySettingsToForm(settings, { resetRequests = true, savedSettings = null, preservePlatformControls = false } = {}) {
