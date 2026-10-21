@@ -1172,7 +1172,7 @@ function supportsAtlasCloudEditModel(model) {
   return isAtlasCloudNanoBananaEditModel(model) || /^openai\/gpt-image-2\/edit$/i.test(String(model || ''));
 }
 
-async function doEdit({ prompt, ratio, selection, sourceDataUrl, referenceDataUrl = '' } = {}) {
+async function doEdit({ prompt, ratio, selection, sourceDataUrl, referenceDataUrl = '' } = {}, control = null) {
   if (!await hasPrivacyConsent()) return { ok: false, error: '请先阅读并同意隐私说明' };
   if (!prompt?.trim()) return { ok: false, error: '编辑说明为空' };
   const s = await loadSettings();
@@ -1183,6 +1183,8 @@ async function doEdit({ prompt, ratio, selection, sourceDataUrl, referenceDataUr
   const size = s.sizeMap?.[ratio] || s.sizeMap?.['1:1'] || '1024x1024';
   const quality = s.imageQuality || 'low';
   const resolution = s.imageResolution || '1k';
+  // 停止可能发生在进度、隐私或设置读取期间；提交编辑请求前再确认。
+  control?.checkpoint();
   let r;
   if (cfg.apiType === 'openrouter-image-v1') {
     const referenceCount = [sourceDataUrl, referenceDataUrl].filter(Boolean).length;
@@ -1787,26 +1789,35 @@ async function editAndSave(payload, update, control) {
     selection: payload.selection,
     sourceDataUrl: source.dataUrl,
     referenceDataUrl: payload.referenceDataUrl || ''
-  });
+  }, control);
   if (!resp?.ok) throw new Error(resp?.error || '图片编辑失败');
-  await update({ stage: '正在保存到相册' });
-  const albumRecordId = await saveGeneratedRecord(resp, {
-    // payload.prompt 是实际发送给编辑模型的替换指令，不应覆盖作品原有提示词。
-    prompt: payload.albumPrompt || payload.sourcePrompt || payload.prompt,
-    requestPrompt: payload.prompt,
-    source,
-    sourcePrompt: payload.sourcePrompt,
-    promptZh: payload.promptZh,
-    explanationLanguage: payload.explanationLanguage,
-    sourceAssetId: sourceAssetIdOf(source),
-    albumMeta: payload.albumMeta
-  });
+  const images = generatedImages(resp);
+  const recordIds = [];
+  await update({ stage: '正在保存到相册', total: images.length });
+  for (const image of images) {
+    // 已提交请求返回的所有结果均须保存，包括用户在等待返回时点击停止的情况。
+    const albumRecordId = await saveGeneratedRecord(image, {
+      // payload.prompt 是实际发送给编辑模型的替换指令，不应覆盖作品原有提示词。
+      prompt: payload.albumPrompt || payload.sourcePrompt || payload.prompt,
+      requestPrompt: payload.prompt,
+      source,
+      sourcePrompt: payload.sourcePrompt,
+      promptZh: payload.promptZh,
+      explanationLanguage: payload.explanationLanguage,
+      sourceAssetId: sourceAssetIdOf(source),
+      albumMeta: payload.albumMeta
+    });
+    recordIds.push(albumRecordId);
+    await update({ completed: recordIds.length, recordIds: [...recordIds], lastRecordId: albumRecordId });
+  }
+  const albumRecordId = recordIds.at(-1);
+  const { images: _images, ...primaryResponse } = resp;
   return {
-    ...resp,
+    ...primaryResponse,
     albumRecordId,
-    recordIds: [albumRecordId],
+    recordIds,
     lastRecordId: albumRecordId,
-    total: 1,
+    total: images.length,
     cancelled: control.isCancelled()
   };
 }
