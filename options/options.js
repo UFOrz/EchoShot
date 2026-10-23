@@ -349,6 +349,8 @@ function renderPlatforms({ preserveControls = false } = {}) {
   }
   if (platform) {
     const preset = PRESETS[platform.preset];
+    const modelFetch = pendingModelFetches.get(platform.id);
+    const fetchingModels = modelFetch && platformRequestMatches(platform, modelFetch.cfg);
     const getKeyUrl = preset?.getKeyUrl || '';
     const platformLabel = preset ? presetLabel(platform.preset) : platformDisplayName(platform);
     const affiliateDisclosure = ui('通过此链接注册，插件开发者可能获得平台推广奖励，不影响您的使用价格。您也可以直接访问平台官网注册。');
@@ -401,7 +403,7 @@ function renderPlatforms({ preserveControls = false } = {}) {
         </div>
       </div>
       <div class="platform-actions">
-        <button class="btn fetch-models" type="button">${esc(ui('自动获取模型'))}</button>
+        <button class="btn fetch-models" type="button"${fetchingModels ? ' disabled' : ''}>${esc(ui(fetchingModels ? '获取中…' : '自动获取模型'))}</button>
         <span class="platform-status">${esc(platformStatusText(platform.id))}</span>
       </div>
       <details class="manual-model-details">
@@ -452,7 +454,11 @@ function platformRequestConfig(platform) {
 
 function platformRequestMatches(platform, cfg) {
   return state.platforms.includes(platform)
-    && platform.preset === cfg.preset
+    && platformRequestConfigMatches(platform, cfg);
+}
+
+function platformRequestConfigMatches(platform, cfg) {
+  return platform.preset === cfg.preset
     && platform.baseUrl === cfg.baseUrl
     && platform.apiKey === cfg.apiKey;
 }
@@ -624,8 +630,10 @@ function bindPlatformCard(card, platform) {
     renderPlatforms({ preserveControls: true });
   });
   card.querySelector('.show-disabled-models').addEventListener('change', (e) => {
+    const transient = captureTransientControls();
     state.showDisabledModels = e.target.checked;
     renderPlatforms();
+    restoreTransientControls(transient);
   });
   card.querySelector('.key-toggle').addEventListener('click', (e) => {
     const input = card.querySelector('[data-field="apiKey"]');
@@ -970,10 +978,25 @@ function applySettingsToForm(settings, { resetRequests = true, savedSettings = n
     pendingWorkflowAliasLookups.clear();
     platformStatus.clear();
   } else {
-    // 普通保存保留未变的平台对象，让进行中的模型查询继续完成。
+    // Names, aliases and model selections can change in another settings page
+    // without invalidating a request made with the same provider credentials.
+    // Keep that object alive so pending callbacks apply to the merged settings.
+    for (const existing of state.platforms) {
+      const incoming = settings.platforms.find((platform) => platform.id === existing.id);
+      if (incoming && platformRequestConfigMatches(existing, incoming)) continue;
+      pendingModelFetches.delete(existing.id);
+      for (const [key, lookup] of pendingWorkflowAliasLookups) {
+        if (lookup.platform.id === existing.id) pendingWorkflowAliasLookups.delete(key);
+      }
+      platformStatus.delete(existing.id);
+    }
     settings.platforms = settings.platforms.map((platform) => {
       const existing = state.platforms.find((item) => item.id === platform.id);
-      return existing && settingsSnapshot(existing) === settingsSnapshot(platform) ? existing : platform;
+      if (!existing || !platformRequestConfigMatches(existing, platform)) return platform;
+      for (const key of Object.keys(existing)) {
+        if (!Object.hasOwn(platform, key)) delete existing[key];
+      }
+      return Object.assign(existing, platform);
     });
   }
   const previousPlatformId = activePlatformId;
