@@ -23,7 +23,7 @@ import {
   queueAllBackups
 } from '../lib/db.js';
 import { restoreBackupDirectory, verifyBackupDirectory } from '../lib/backup-restore.js';
-import { t } from '../lib/i18n.js';
+import { localizeRuntimeError, t } from '../lib/i18n.js';
 
 const $ = (id) => document.getElementById(id);
 const enabled = $('localBackupEnabled');
@@ -46,10 +46,12 @@ let latestStatus = null;
 
 const language = () => document.documentElement.dataset.language || 'zh';
 const ui = (key, vars = {}) => t(key, vars, language());
+const runtimeError = (error) => localizeRuntimeError(error, language());
 const statusText = (value) => {
-  if (!value?.messageKey) return value?.message || '';
+  if (!value?.messageKey) return value?.message ? runtimeError(value.message) : '';
   const vars = { ...(value.messageVars || {}) };
   if (vars.subject) vars.subject = ui(vars.subject);
+  if (vars.error != null) vars.error = runtimeError(vars.error);
   return ui(value.messageKey, vars);
 };
 
@@ -96,8 +98,8 @@ function backupDiagnostics(result, { includeLegacy = false } = {}) {
   return [
     ...(includeLegacy ? [ui('旧版未校验：{count}', { count: result.unverified })] : []),
     ...(result.sourceWarnings ? [ui('原图缺失或损坏：{count}；成图可正常恢复', { count: result.sourceWarnings })] : []),
-    ...result.errors.slice(0, 3),
-    ...(result.warnings || []).slice(0, 3)
+    ...result.errors.slice(0, 3).map(runtimeError),
+    ...(result.warnings || []).slice(0, 3).map(runtimeError)
   ].join('；');
 }
 
@@ -228,7 +230,7 @@ async function runQueuedBackups({ queueAll = false } = {}) {
       });
     }
   } catch (error) {
-    status.textContent = ui('备份未完成：{error}', { error: error?.message || error });
+    status.textContent = ui('备份未完成：{error}', { error: runtimeError(error) });
   } finally {
     busy = false;
     stop.hidden = true;
@@ -251,7 +253,7 @@ choose.addEventListener('click', async () => {
     await refreshCounts();
     void runQueuedBackups();
   } catch (error) {
-    if (error.name !== 'AbortError') status.textContent = ui('目录设置失败：{error}', { error: error.message });
+    if (error.name !== 'AbortError') status.textContent = ui('目录设置失败：{error}', { error: runtimeError(error) });
   } finally { controls(); }
 });
 
@@ -260,7 +262,7 @@ enabled.addEventListener('change', async () => {
     config = await setBackupEnabled(enabled.checked);
     status.textContent = ui(config.enabled ? '自动备份已启用' : '自动备份已暂停，已有文件保留');
     if (config.enabled) void runQueuedBackups();
-  } catch (error) { status.textContent = ui('备份未完成：{error}', { error: error?.message || error }); }
+  } catch (error) { status.textContent = ui('备份未完成：{error}', { error: runtimeError(error) }); }
   finally { controls(); }
 });
 
@@ -291,7 +293,7 @@ verify.addEventListener('click', async () => {
     status.textContent = ui('校验完成：通过 {valid}，损坏或缺失 {failed}，旧版未校验 {unverified}', result);
     diagnostics.textContent = backupDiagnostics(result);
   } catch (error) {
-    status.textContent = error?.name === 'AbortError' ? ui('任务已停止') : ui('校验失败：{error}', { error: error?.message || error });
+    status.textContent = error?.name === 'AbortError' ? ui('任务已停止') : ui('校验失败：{error}', { error: runtimeError(error) });
   } finally {
     stop.hidden = true;
     abortController = null;
@@ -331,7 +333,7 @@ restore.addEventListener('click', async () => {
   } catch (error) {
     status.textContent = error?.name === 'AbortError' ? ui('任务已停止')
       : error?.name === 'SecurityError' ? ui('无法打开目录选择器，请重新点击“从备份恢复相册”并选择目录。')
-        : ui('恢复失败：{error}', { error: error?.message || error });
+        : ui('恢复失败：{error}', { error: runtimeError(error) });
   } finally {
     stop.hidden = true;
     abortController = null;
@@ -363,7 +365,7 @@ diagnose.addEventListener('click', async () => {
     });
     status.textContent = directoryResult.writable ? ui('存储与目录诊断完成') : ui('目录不可写，请重新授权或更换目录');
   } catch (error) {
-    status.textContent = ui('诊断失败：{error}', { error: error?.message || error });
+    status.textContent = ui('诊断失败：{error}', { error: runtimeError(error) });
   } finally {
     busy = false;
     controls();
@@ -403,4 +405,4 @@ async function init() {
   await refreshCounts();
   await refreshStorageStatus().catch(() => {});
 }
-init().catch((error) => { status.textContent = ui('备份设置读取失败：{error}', { error: error.message }); });
+init().catch((error) => { status.textContent = ui('备份设置读取失败：{error}', { error: runtimeError(error) }); });
