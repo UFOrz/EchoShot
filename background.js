@@ -193,6 +193,11 @@ function normalizedGenerationJobs(value) {
     .sort((a, b) => (Number(a.startedAt) || 0) - (Number(b.startedAt) || 0));
 }
 
+function normalizedGenerationNotificationIds(value) {
+  return [...new Set((Array.isArray(value) ? value : [])
+    .filter((id) => typeof id === 'string' && id))];
+}
+
 async function upsertGenerationJob(windowId, state) {
   return withGenerationJobsLock(windowId, async () => {
     const jobs = normalizedGenerationJobs(await getWindowSession('generationJobs', windowId));
@@ -206,7 +211,42 @@ async function upsertGenerationJob(windowId, state) {
     const stored = [...running, ...finished]
       .sort((a, b) => (Number(a.startedAt) || 0) - (Number(b.startedAt) || 0));
     await setWindowSession('generationJobs', windowId, stored);
+    const receipts = normalizedGenerationNotificationIds(
+      await getWindowSession('generationNotifications', windowId)
+    );
+    const terminalIds = new Set(stored
+      .filter((job) => job.status !== 'running')
+      .map((job) => job.id));
+    const retainedReceipts = receipts
+      .filter((id) => terminalIds.has(id))
+      .slice(-GENERATION_JOB_HISTORY_LIMIT);
+    if (retainedReceipts.length !== receipts.length) {
+      await setWindowSession('generationNotifications', windowId, retainedReceipts);
+    }
     return stored;
+  });
+}
+
+async function claimGenerationNotifications(windowId, requestedJobIds) {
+  return withGenerationJobsLock(windowId, async () => {
+    if (closedWindowIds.has(windowId)) return [];
+    const jobs = normalizedGenerationJobs(await getWindowSession('generationJobs', windowId));
+    const terminalIds = new Set(jobs
+      .filter((job) => job.status !== 'running')
+      .map((job) => job.id));
+    const receipts = normalizedGenerationNotificationIds(
+      await getWindowSession('generationNotifications', windowId)
+    );
+    const receiptIds = new Set(receipts);
+    const claimed = normalizedGenerationNotificationIds(requestedJobIds)
+      .filter((id) => terminalIds.has(id) && !receiptIds.has(id));
+    if (claimed.length) {
+      const retainedReceipts = [...receipts, ...claimed]
+        .filter((id, index, values) => values.indexOf(id) === index && terminalIds.has(id))
+        .slice(-GENERATION_JOB_HISTORY_LIMIT);
+      await setWindowSession('generationNotifications', windowId, retainedReceipts);
+    }
+    return claimed;
   });
 }
 
@@ -315,7 +355,7 @@ chrome.windows?.onRemoved?.addListener((windowId) => {
   activeSourceRequestIds.delete(windowId);
   regionCaptureEpochs.delete(windowId);
   regionCaptureStates.delete(windowId);
-  const keys = ['pendingSource', 'panelTask', 'replacementDraft', 'surpriseTask', 'surpriseJob', 'albumAction', 'captureFeedback', 'job', 'reverseJob', 'generationJobs']
+  const keys = ['pendingSource', 'panelTask', 'replacementDraft', 'surpriseTask', 'surpriseJob', 'albumAction', 'captureFeedback', 'job', 'reverseJob', 'generationJobs', 'generationNotifications']
     .map((kind) => scopedSessionKey(kind, windowId))
     .filter(Boolean);
   if (keys.length) void chrome.storage.session.remove(keys).then(() => pruneSourceCache()).catch(() => {});
@@ -535,6 +575,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         return { ok: true, job: await getWindowSession('job', windowId) };
       case 'ir.getGenerationJobs':
         return { ok: true, jobs: normalizedGenerationJobs(await getWindowSession('generationJobs', windowId)) };
+      case 'ir.job.notificationClaim':
+        return {
+          ok: true,
+          claimedJobIds: await claimGenerationNotifications(windowId, msg.payload?.jobIds)
+        };
       case 'ir.getReverseJob':
         return { ok: true, job: await getWindowSession('reverseJob', windowId) };
       case 'ir.getSurpriseJob':

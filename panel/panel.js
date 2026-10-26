@@ -2427,6 +2427,19 @@ function renderGenerationJobs(jobs, options = {}) {
   return run;
 }
 
+async function claimGenerationNotificationIds(jobs) {
+  const jobIds = [...new Set((Array.isArray(jobs) ? jobs : [])
+    .map((job) => job?.id)
+    .filter(Boolean))];
+  if (!jobIds.length) return new Set();
+  const response = await send({
+    type: 'ir.job.notificationClaim',
+    payload: { jobIds }
+  });
+  if (!response?.ok) throw new Error(response?.error || ui('无法确认任务通知状态'));
+  return new Set(response.claimedJobIds || []);
+}
+
 async function renderGenerationJobsNow(jobs, { restore = false } = {}) {
   const expectedSourceKey = sourceKey(source);
   const incoming = Array.isArray(jobs) ? jobs : [];
@@ -2439,6 +2452,7 @@ async function renderGenerationJobsNow(jobs, { restore = false } = {}) {
     .filter((job) => job.status !== 'running' && !presentedGenerationJobIds.has(job.id))
     .sort((a, b) => (Number(a.finishedAt || a.updatedAt) || 0) - (Number(b.finishedAt || b.updatedAt) || 0));
   if (!terminal.length && !restore) return;
+  const claimedGenerationJobIds = await claimGenerationNotificationIds(terminal);
 
   // 一次存储更新可能同时带回多个已完成任务。逐个标记并按完成顺序追加，
   // 同一个相册记录由 appendResultCard 去重，避免监听与消息响应重复渲染。
@@ -2481,7 +2495,8 @@ async function renderGenerationJobsNow(jobs, { restore = false } = {}) {
   }
   if (newestRecord) {
     void persistTask({ albumRecordId: newestRecord.id });
-    const hasNewCompletion = matching.some((job) => job.status === 'completed');
+    const hasNewCompletion = matching.some((job) =>
+      job.status === 'completed' && claimedGenerationJobIds.has(job.id));
     if (hasNewCompletion && !restore && newestCard) {
       revealGeneratedResult(newestCard, newestCard.querySelector('.result-img'));
     }
@@ -2505,7 +2520,8 @@ async function renderGenerationJobsNow(jobs, { restore = false } = {}) {
     show(els.replaceDone, false);
     show(els.replaceError, false);
   }
-  const failureCandidates = (restore ? sourceTerminals : matching).filter((job) => job.status === 'failed');
+  const failureCandidates = sourceTerminals.filter((job) =>
+    job.status === 'failed' && claimedGenerationJobIds.has(job.id));
   const latestFailure = failureCandidates.sort((a, b) => feedbackTimestamp(a) - feedbackTimestamp(b)).at(-1);
   if (latestFailure) {
     const superseded = hasOtherJob && feedbackTimestamp(otherJob) > feedbackTimestamp(latestFailure);
@@ -2520,7 +2536,7 @@ async function renderGenerationJobsNow(jobs, { restore = false } = {}) {
   }
 
   if (!matching.length && !restore) {
-    const latest = terminal.at(-1);
+    const latest = terminal.filter((job) => claimedGenerationJobIds.has(job.id)).at(-1);
     if (latest?.status === 'completed') showToast(ui('上一张图片的生成已完成，已保存到相册'));
     else if (latest?.status === 'failed') {
       showToast(ui('上一张图片生成失败：{error}', { error: localizeRuntimeError(latest.error || ui('未知错误'), currentLanguage) }));
