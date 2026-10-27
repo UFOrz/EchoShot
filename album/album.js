@@ -7,7 +7,7 @@ import {
   getAllRecordIds,
   getById,
   getCharacterByAlbumRecordId,
-  getPage,
+  getGalleryPage,
   getRecordsByIds,
   getSourceBlob,
   removeMany
@@ -127,6 +127,10 @@ let downloadProgressTimer = 0;
 let albumWindowId = null;
 let searchTimer = 0;
 let pageLoadSeq = 0;
+let modelSearchRevision = 0;
+let galleryCursorQuery = '';
+let galleryCursorRevision = '';
+const galleryCursors = new Map();
 let albumReady = false;
 let albumRefreshPending = false;
 let albumRefreshRunning = false;
@@ -577,6 +581,7 @@ function updateSelUI() {
   els.btnSelectAll.disabled = downloadingAll || filtered.length === 0;
   els.btnDownloadSel.disabled = downloadingAll || n === 0;
   els.btnDeleteSel.disabled = downloadingAll || n === 0;
+  els.lbDelete.disabled = downloadingAll;
   els.btnDownloadAll.disabled = downloadingAll || totalAlbumRecords === 0;
   els.btnDownloadAll.textContent = downloadingAll
     ? t('正在打包…', {}, currentLanguage)
@@ -872,12 +877,20 @@ function downloadErrorMessage(error) {
   ].includes(message) ? ui(message) : message;
 }
 
+async function readAlbumExportBatch(recordIds) {
+  const records = await getRecordsByIds(recordIds);
+  const foundIds = new Set(records.map(record => record.id));
+  if (records.length !== recordIds.length || recordIds.some(id => !foundIds.has(id))) {
+    throw new Error(ui('相册图片在打包期间发生变化，请重新开始下载'));
+  }
+  return records;
+}
+
 async function* albumZipEntries(recordIds, signal) {
   const usedNames = new Set();
   for (let start = 0; start < recordIds.length; start += STREAM_READ_BATCH_SIZE) {
     if (signal.aborted) throw new DOMException('Download cancelled', 'AbortError');
-    const batch = await getRecordsByIds(recordIds.slice(start, start + STREAM_READ_BATCH_SIZE));
-    if (!batch.length) throw new Error(ui('读取相册图片失败'));
+    const batch = await readAlbumExportBatch(recordIds.slice(start, start + STREAM_READ_BATCH_SIZE));
     for (const rec of batch) {
       if (signal.aborted) throw new DOMException('Download cancelled', 'AbortError');
       const { ext } = await detectImageFileType(rec.blob);
@@ -901,8 +914,7 @@ async function downloadAllFallback(recordIds, fileName, signal) {
   for (let part = 0; part < batchCount; part += 1) {
     if (signal.aborted) throw new DOMException('Download cancelled', 'AbortError');
     const start = part * ZIP_BATCH_SIZE;
-    const batch = await getRecordsByIds(recordIds.slice(start, start + ZIP_BATCH_SIZE));
-    if (!batch.length) throw new Error(ui('读取相册图片失败'));
+    const batch = await readAlbumExportBatch(recordIds.slice(start, start + ZIP_BATCH_SIZE));
     const usedNames = new Set();
     const entries = [];
     for (const rec of batch) {
@@ -920,6 +932,7 @@ async function downloadAllFallback(recordIds, fileName, signal) {
     downloadBlob(buildZip(entries), `${stem}${suffix}.zip`, 2000);
     if (part + 1 < batchCount) await new Promise((resolve) => setTimeout(resolve, 2200));
   }
+  return completed;
 }
 
 async function downloadAllRecords({ fileHandlePromise = null, fileName }) {
@@ -932,21 +945,25 @@ async function downloadAllRecords({ fileHandlePromise = null, fileName }) {
     totalAlbumRecords = total;
     updateDownloadProgress(0, total, '正在准备 {total} 张图片…');
 
+    let completed = 0;
     if (fileHandlePromise) {
       const fileHandle = await fileHandlePromise;
       if (signal.aborted) throw new DOMException('Download cancelled', 'AbortError');
       writable = await fileHandle.createWritable();
-      await writeZipStream(albumZipEntries(recordIds, signal), writable, {
+      const result = await writeZipStream(albumZipEntries(recordIds, signal), writable, {
         signal,
         total,
         onProgress: ({ completed }) => updateDownloadProgress(completed, total)
       });
+      completed = result.entries;
+      if (completed !== total) throw new Error(ui('相册图片在打包期间发生变化，请重新开始下载'));
       await writable.close();
       writable = null;
     } else {
-      await downloadAllFallback(recordIds, fileName, signal);
+      completed = await downloadAllFallback(recordIds, fileName, signal);
     }
-    updateDownloadProgress(total, total, '已完成 {total} 张图片的打包');
+    if (completed !== total) throw new Error(ui('相册图片在打包期间发生变化，请重新开始下载'));
+    updateDownloadProgress(completed, completed, '已完成 {total} 张图片的打包');
     showToast(ui(fileHandlePromise ? '全部图片已保存到一个 ZIP 文件' : '全部图片已开始下载'));
     hideDownloadProgress(1600);
   } catch (error) {
@@ -1170,9 +1187,11 @@ els.lbDownload.addEventListener('click', () => {
 });
 
 els.lbDelete.addEventListener('click', async () => {
+  if (downloadingAll) return;
   const rec = records.find((r) => r.id === currentLbId);
   if (!rec) return;
   if (!await confirmRecordDeletion([rec.id], ui('确定删除这张图片吗？此操作不可恢复。'))) return;
+  if (downloadingAll) return;
   closeLightbox();
   if (await deleteRecordsWithFeedback([rec.id])) {
     showToast(t('已删除', {}, currentLanguage));
@@ -1222,12 +1241,17 @@ els.confirmBackdrop.addEventListener('click', () => closeDeleteConfirmation(fals
 async function loadPage(offset = 0, requestedId = '', { animateDeletion = false, preserveView = false } = {}) {
   const requestSeq = ++pageLoadSeq;
   const query = els.searchInput.value.trim();
-  const [{ records: pageRecords, hasMore: nextPage }, total, albumTotal] = await Promise.all([
-    getPage({ offset, limit: PAGE_SIZE, query, searchTermsForRecord }),
-    countAll(query, { searchTermsForRecord }),
-    countAll('')
-  ]);
+  const queryKey = JSON.stringify([query.toLowerCase(), modelSearchRevision]);
+  const { records: pageRecords, hasMore: nextPage, total, albumTotal, nextCursor, revision } = await getGalleryPage({
+    offset, limit: PAGE_SIZE, query, searchTermsForRecord, searchCacheKey: modelSearchRevision,
+    after: galleryCursorQuery === queryKey ? galleryCursors.get(offset) : null
+  });
   if (requestSeq !== pageLoadSeq) return;
+  if (galleryCursorQuery !== queryKey || galleryCursorRevision !== revision) galleryCursors.clear();
+  galleryCursorQuery = queryKey;
+  galleryCursorRevision = revision;
+  if (nextPage && nextCursor) galleryCursors.set(offset + PAGE_SIZE, nextCursor);
+  if (galleryCursors.size > 128) galleryCursors.delete(galleryCursors.keys().next().value);
   if (preserveView && (selected.size || currentLbId || confirmResolver || downloadingAll || searchTimer)) {
     albumRefreshPending = true;
     return;
@@ -1334,6 +1358,7 @@ chrome.storage.local.onChanged.addListener((changes) => {
       return previous.size !== next.size || [...next].some(([model, alias]) => previous.get(model) !== alias);
     });
     currentLanguage = nextLanguage;
+    if (aliasesChanged) modelSearchRevision += 1;
     modelAliasIndex = nextAliases;
     // Saving a default model/ratio does not change album content or browsing state.
     if (!languageChanged && !aliasesChanged) return;

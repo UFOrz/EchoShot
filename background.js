@@ -1,6 +1,6 @@
 // 后台 Service Worker：消息路由、来源图片抓取、反推与生图调用、侧边栏/相册打开
 
-import { allowsEmptyApiKey, apiBaseUrlError, imageEditReferenceLimit, isAtlasCloudNanoBananaEditModel, isModelScopeImageEditModel, loadSettings, providerLabel, requiresSourceImage, resolveModelConfig, supportsImageEdit } from './lib/settings.js';
+import { allowsEmptyApiKey, apiBaseUrlError, imageEditReferenceLimit, isAtlasCloudNanoBananaEditModel, isModelScopeImageEditModel, isModelScopeProvider, loadSettings, providerLabel, requiresSourceImage, resolveModelConfig, supportsImageEdit } from './lib/settings.js';
 import {
   normalizeImageBlob,
   blobFromDataUrl,
@@ -1322,7 +1322,7 @@ async function doEdit({ prompt, ratio, selection, sourceDataUrl, referenceDataUr
     r = await generateRunningHubAppImage({ cfg, prompt: prompt.trim(), ratio, size, sourceDataUrl, referenceDataUrl });
   } else if (cfg.apiType === 'runninghub-workflow-v2') {
     return { ok: false, error: '当前 RunningHUB 工作流不支持角色替换，请选择图生图或 edit 模型' };
-  } else if (cfg.preset === 'modelscope') {
+  } else if (isModelScopeProvider(cfg)) {
     if (!isModelScopeImageEditModel(cfg)) {
       return { ok: false, error: '请选择 ModelScope 的 Qwen-Image-Edit 图生图模型' };
     }
@@ -1415,7 +1415,7 @@ async function saveGeneratedRecord(resp, {
     pageUrl: source?.pageUrl || '',
     blob,
     ...albumMeta
-  }, sourceBlob, sourceBlob ? sourceAssetId : '');
+  }, sourceBlob, sourceBlob ? sourceAssetId : '', { deferBackup: true });
   return recordId;
 }
 
@@ -1486,7 +1486,7 @@ async function runWindowJob(type, windowId, executor, initial = {}, {
       cancelledAt: cancelled ? Date.now() : undefined,
       completed: Array.isArray(result.recordIds)
         ? result.recordIds.length
-        : (state.completed ?? (cancelled ? 0 : 1)),
+        : (cancelled ? (state.completed ?? 0) : (result.total ?? state.total ?? 1)),
       total: result.total ?? state.total ?? 1,
       recordIds: result.recordIds || state.recordIds,
       lastRecordId: result.lastRecordId || result.albumRecordId || state.lastRecordId || ''
