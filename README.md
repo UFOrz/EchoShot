@@ -51,7 +51,7 @@ EchoShot · 拍同款是一款基于 Chrome Manifest V3 的浏览器扩展。用
 - 扩展开发者不运营 API 中转服务器。
 - 扩展不加载或执行远程 JavaScript。
 
-完整说明见 [PRIVACY.md](PRIVACY.md)。
+完整说明见 [PRIVACY.md](PRIVACY.md)。浏览器商店专用政策：[Chrome](https://uforz.github.io/EchoShot/privacy-policy-pai-tong-kuan.html)、[Microsoft Edge](https://uforz.github.io/EchoShot/privacy-policy-edge-pai-tong-kuan.html)。
 
 ## 推广链接披露
 
@@ -60,9 +60,10 @@ EchoShot · 拍同款是一款基于 Chrome Manifest V3 的浏览器扩展。用
 ## 权限说明
 
 - `storage`：保存平台配置、API Key、任务状态和界面设置。
+- `unlimitedStorage`：降低本机相册、原图和参考素材因存储配额或存储压力被清理的风险。
 - `sidePanel`：提供主要创作工作流。
 - `contextMenus`：提供网页图片右键入口。
-- `scripting`：在用户主动操作时执行选图和框选截图功能。
+- `scripting`：安装或更新后向已打开的普通网页注入扩展自带脚本，并在用户发起框选截图时显示选区。
 - `<all_urls>`：识别用户主动选择的网页图片，并访问用户配置的 AI API 地址。
 
 ## 开源范围
