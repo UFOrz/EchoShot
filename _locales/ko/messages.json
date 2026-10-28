@@ -1,0 +1,8 @@
+{
+  "extensionName": {
+    "message": "EchoShot · 拍同款"
+  },
+  "extensionDescription": {
+    "message": "이미지에서 AI 프롬프트를 추출하고 비슷한 이미지를 생성해 로컬 앨범에서 관리하세요."
+  }
+}

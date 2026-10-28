@@ -1,0 +1,8 @@
+{
+  "extensionName": {
+    "message": "EchoShot · 拍同款"
+  },
+  "extensionDescription": {
+    "message": "画像からAIプロンプトを抽出し、似た画像を生成。作品をローカルアルバムで管理できます。"
+  }
+}
