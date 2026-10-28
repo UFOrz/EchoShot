@@ -39,7 +39,7 @@ import {
   testConnection
 } from './lib/api.js';
 import { hasPrivacyConsent } from './lib/privacy.js';
-import { addRecordWithSource, resumePendingBackups } from './lib/db.js';
+import { addRecordWithSource, ensureGalleryWritable, resumePendingBackups } from './lib/db.js';
 import { promptFromImageGenerationMetadata, readImageGenerationMetadata } from './lib/image-metadata.js';
 import { interruptedSessionPatch, normalizedWindowId, recoverInterruptedGenerationJobs, scopedSessionKey, sourceKey } from './lib/task-state.js';
 import { resolveLanguage, t } from './lib/i18n.js';
@@ -1766,6 +1766,16 @@ async function persistGenerationDraft(payload) {
   });
 }
 
+async function checkGalleryBeforeRequest(control) {
+  try {
+    await ensureGalleryWritable();
+  } catch (error) {
+    control.checkpoint();
+    throw error;
+  }
+  control.checkpoint();
+}
+
 async function generateAndSave(payload, update, control) {
   const source = payload.sourceSnapshot?.sourceBlobId
     ? await hydrateSource(payload.sourceSnapshot) : payload.sourceSnapshot ? { ...payload.sourceSnapshot } : null;
@@ -1780,6 +1790,7 @@ async function generateAndSave(payload, update, control) {
   });
   // 文案随生成请求交给后台保存，侧栏关闭不会取消提交前的持久化。
   await persistGenerationDraft(payload);
+  await checkGalleryBeforeRequest(control);
   const resp = await doGenerate({
     ...payload,
     sourceDataUrl: payload.sourceDataUrl || '',
@@ -1828,6 +1839,7 @@ async function editAndSave(payload, update, control) {
     sourceKey: source?.requestId || source?.ts || null,
     label: payload.albumMeta?.kind === 'replacement' ? 'replacement' : 'generate'
   });
+  await checkGalleryBeforeRequest(control);
   const resp = await doEdit({
     prompt: payload.prompt,
     ratio: payload.ratio,
@@ -1894,6 +1906,7 @@ async function generateGroupAndSave(payload, update, control) {
       : `${payload.prompt}\n\n这是同一主题组图的第 ${number} 张。保持主体类型、核心外观、服装、环境、光线、色彩和整体画风尽量一致，仅对动作、表情、机位或构图做自然的小幅变化；不得增加或删除主要角色。`;
     // 等待进度写入时也可能收到停止请求，提交下一次调用前再确认。
     if (control.isCancelled()) break;
+    await checkGalleryBeforeRequest(control);
     const resp = await doGenerate({
       prompt: variationPrompt,
       ratio: payload.ratio,
