@@ -20,6 +20,7 @@ import {
   withSettingsWriteLock
 } from '../lib/settings.js';
 import { localizeDocument, localizeRuntimeError, resolveLanguage, t } from '../lib/i18n.js';
+import { createModelPicker } from '../panel/model-picker.js';
 
 const $ = (id) => document.getElementById(id);
 const sizeInputIds = {
@@ -43,7 +44,14 @@ let externalSettingsRefreshSeq = 0;
 const platformStatus = new Map();
 const pendingModelFetches = new Map();
 const pendingWorkflowAliasLookups = new Map();
+const modelSearches = new Map();
+const openModelSearches = new Set();
+const modelScrollPositions = new Map();
 const ui = (key, vars = {}) => t(key, vars, currentLanguage);
+const defaultModelPickers = new Map([
+  [$('defaultVision'), createModelPicker($('defaultVision'), ui)],
+  [$('defaultImage'), createModelPicker($('defaultImage'), ui)]
+]);
 const platformStatusText = (platformId) => {
   const status = platformStatus.get(platformId);
   if (!status) return '';
@@ -255,9 +263,15 @@ function newPresetPlatform(presetId) {
 
 function modelRows(platform) {
   if (!platform.models.length) return `<div class="model-empty">${esc(ui('尚未获取模型，可自动获取或手动添加。'))}</div>`;
-  const visibleModels = state.showDisabledModels
+  let visibleModels = state.showDisabledModels
     ? platform.models
     : platform.models.filter((model) => platform.visionModels.includes(model) || platform.imageModels.includes(model));
+  const search = (modelSearches.get(platform.id) || '').trim().toLocaleLowerCase();
+  if (search) {
+    visibleModels = visibleModels.filter((model) =>
+      `${model} ${platform.modelAliases?.[model] || ''}`.toLocaleLowerCase().includes(search));
+    if (!visibleModels.length) return `<div class="model-empty" role="status">${esc(ui('未找到匹配模型，可尝试显示未启用模型。'))}</div>`;
+  }
   if (!visibleModels.length) return `<div class="model-empty">${esc(ui('未启用的模型已隐藏，可打开上方开关查看。'))}</div>`;
   return visibleModels.map((model, index) => {
     const enabled = platform.visionModels.includes(model) || platform.imageModels.includes(model);
@@ -334,6 +348,21 @@ function renderPlatformNav() {
   listedPlatforms.forEach((platform) => appendPlatformNavItem(list, platform));
 }
 
+function updateModelSearchShortcut(card) {
+  const list = card.querySelector('.model-list');
+  const field = card.querySelector('.model-search-field');
+  const shortcut = card.querySelector('.model-search-shortcut');
+  if (!field.hidden && card.querySelector('.model-search').value.trim()) {
+    list.style.setProperty('--model-search-offset', `${field.offsetHeight}px`);
+  }
+  shortcut.hidden = !field.hidden || !list.querySelector('.model-row') || list.scrollHeight > list.clientHeight + 1;
+}
+
+window.addEventListener('resize', () => {
+  const card = $('platformDetail').querySelector('.platform-card');
+  if (card) updateModelSearchShortcut(card);
+});
+
 function renderPlatforms({ preserveControls = false } = {}) {
   const listedPlatforms = state.platforms.filter((platform) => platform.listed !== false);
   if (!listedPlatforms.some((platform) => platform.id === activePlatformId)) {
@@ -344,6 +373,7 @@ function renderPlatforms({ preserveControls = false } = {}) {
   const previousCard = detail.querySelector('.platform-card');
   const retainedCard = preserveControls && previousCard?.dataset.id === platform?.id ? previousCard : null;
   if (!retainedCard) {
+    if (previousCard?.dataset.id) modelScrollPositions.set(previousCard.dataset.id, previousCard.querySelector('.model-list').scrollTop);
     renderPlatformNav();
     detail.innerHTML = '';
   }
@@ -371,7 +401,8 @@ function renderPlatforms({ preserveControls = false } = {}) {
       retainedCard.querySelector('.platform-index').textContent = platformDisplayName(platform).slice(0, 1) || 'P';
       retainedCard.querySelector('.preset-chip').textContent = presetLabel(platform.preset);
       retainedCard.querySelector('.key-field-label').innerHTML = `<span>API Key</span>${getKeyLink}`;
-      retainedCard.querySelector('.model-list').innerHTML = modelRows(platform);
+      retainedCard.querySelector('.model-results').innerHTML = modelRows(platform);
+      updateModelSearchShortcut(retainedCard);
       const nav = [...$('platformList').querySelectorAll('.platform-nav-item')].find(item => item.dataset.id === platform.id);
       if (nav) {
         nav.querySelector('b').textContent = platformDisplayName(platform);
@@ -414,6 +445,7 @@ function renderPlatforms({ preserveControls = false } = {}) {
       <p class="model-use-hint">${esc(ui('勾选模型用途，再在下方选择默认模型。'))}</p>
       <div class="model-head">
         <span class="model-head-main">
+          <button class="model-search-shortcut" type="button" aria-label="${esc(ui('搜索模型'))}" title="${esc(ui('搜索模型'))}" hidden><svg class="model-search-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"></circle><path d="m15.5 15.5 4.5 4.5"></path></svg></button>
           <span>${esc(ui('模型名称、别名与启用能力'))}</span>
           <span class="model-kind-legend" aria-label="${esc(ui('模型能力图例'))}">
             <span title="${esc(ui('适合反推'))}">${MODEL_KIND_ICONS.vision}<span>${esc(ui('反推'))}</span></span>
@@ -423,9 +455,22 @@ function renderPlatforms({ preserveControls = false } = {}) {
         </span>
         <label class="model-filter-toggle"><input class="show-disabled-models" type="checkbox" ${state.showDisabledModels ? 'checked' : ''}/> ${esc(ui('显示未启用模型'))}</label>
       </div>
-      <div class="model-list">${modelRows(platform)}</div>`;
+      <div class="model-list-shell">
+        <div class="model-search-field" ${openModelSearches.has(platform.id) || modelSearches.get(platform.id) ? '' : 'hidden'}>
+          <label class="model-search-label" for="platformModelSearch-${esc(platform.id)}">${esc(ui('搜索模型'))}</label>
+          <div class="model-search-control">
+            <svg class="model-search-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"></circle><path d="m15.5 15.5 4.5 4.5"></path></svg>
+            <input id="platformModelSearch-${esc(platform.id)}" class="model-search" type="search" value="${esc(modelSearches.get(platform.id) || '')}" placeholder="${esc(ui('搜索模型…'))}" autocomplete="off" />
+          </div>
+        </div>
+        <div class="model-list${(modelSearches.get(platform.id) || '').trim() ? ' is-searching' : ''}" role="region" tabindex="0" aria-label="${esc(ui('模型名称、别名与启用能力'))}">
+          <div class="model-results">${modelRows(platform)}</div>
+        </div>
+      </div>`;
     bindPlatformCard(card, platform);
     detail.appendChild(card);
+    card.querySelector('.model-list').scrollTop = modelScrollPositions.get(platform.id) || 0;
+    updateModelSearchShortcut(card);
   }
   renderDefaults();
   localizeDocument(currentLanguage);
@@ -575,6 +620,41 @@ function fetchManualRunningHubApp(platform, model) {
 }
 
 function bindPlatformCard(card, platform) {
+  const modelList = card.querySelector('.model-list');
+  const searchField = card.querySelector('.model-search-field');
+  const searchInput = card.querySelector('.model-search');
+  const searchShortcut = card.querySelector('.model-search-shortcut');
+  const revealSearch = () => {
+    openModelSearches.add(platform.id);
+    searchField.hidden = false;
+    searchShortcut.hidden = true;
+  };
+  const hideSearchAtTop = () => {
+    if (modelList.scrollTop > 0 || searchInput.value.trim() || document.activeElement === searchInput) return;
+    searchField.hidden = true;
+    openModelSearches.delete(platform.id);
+    updateModelSearchShortcut(card);
+  };
+  searchShortcut.addEventListener('click', () => {
+    revealSearch();
+    searchInput.focus({ preventScroll: true });
+  });
+  modelList.addEventListener('scroll', () => {
+    modelScrollPositions.set(platform.id, modelList.scrollTop);
+    if (modelList.scrollTop > 0) revealSearch();
+    else hideSearchAtTop();
+  }, { passive: true });
+  searchInput.addEventListener('input', (event) => {
+    modelSearches.set(platform.id, event.target.value);
+    revealSearch();
+    const searching = Boolean(event.target.value.trim());
+    if (searching) modelList.style.setProperty('--model-search-offset', `${searchField.offsetHeight}px`);
+    modelList.classList.toggle('is-searching', searching);
+    card.querySelector('.model-results').innerHTML = modelRows(platform);
+    modelList.scrollTop = 0;
+    modelScrollPositions.set(platform.id, 0);
+  });
+  searchInput.addEventListener('blur', hideSearchAtTop);
   card.querySelectorAll('[data-field]').forEach((input) => {
     input.addEventListener('input', () => {
       platform[input.dataset.field] = input.value;
@@ -764,6 +844,7 @@ function bindPlatformCard(card, platform) {
     const enabled = platform.visionModels.includes(model) || platform.imageModels.includes(model);
     row.classList.toggle('disabled-model', !enabled);
     if (!state.showDisabledModels && !enabled) row.remove();
+    updateModelSearchShortcut(card);
     const navItem = [...$('platformList').querySelectorAll('.platform-nav-item')]
       .find((item) => item.dataset.id === platform.id);
     const counts = navItem?.querySelectorAll('.platform-nav-count i') || [];
@@ -848,6 +929,7 @@ function renderDefaultSelect(type) {
     state.defaults[type] = { platformId: fallback.platformId, model: fallback.model };
     select.value = choiceValue(fallback);
   }
+  defaultModelPickers.get(select).setChoices(choices);
 }
 
 function renderDefaults() { renderDefaultSelect('vision'); renderDefaultSelect('image'); }
@@ -1185,7 +1267,7 @@ document.querySelectorAll('[data-settings-target]').forEach((button) => {
     const targetId = button.dataset.settingsTarget;
     const target = targetId === 'platformKey'
       ? $('platformDetail').querySelector('[data-field="apiKey"]') || $('addPlatformPreset')
-      : $(targetId);
+      : targetId === 'defaultVision' ? $(targetId + 'Picker') : $(targetId);
     target?.scrollIntoView({ behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'center' });
     if (targetId === 'btnSave' && target?.disabled) $('saveState').focus({ preventScroll: true });
     else target?.focus({ preventScroll: true });

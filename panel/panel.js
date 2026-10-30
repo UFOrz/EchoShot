@@ -23,6 +23,7 @@ import { explanationLabel, localizeDocument, localizeRuntimeError, resolveLangua
 import { blobFromDataUrl, decodeImageBlob, normalizeImageBlob } from '../lib/api.js';
 import { imageAspectInfo } from '../lib/generation-results.js';
 import { hydrateSource, sourceMetadata } from '../lib/source-store.js';
+import { createModelPicker } from './model-picker.js';
 
 const $ = (id) => document.getElementById(id);
 const MAX_CONCURRENT_GENERATION_JOBS = 4;
@@ -264,6 +265,10 @@ let currentSurpriseProfile = '';
 let currentSurpriseProfileLabel = '';
 let currentSurpriseExplanation = '';
 const ui = (key, vars = {}) => t(key, vars, currentLanguage);
+const modelPickers = new Map([
+  [els.selVisionModel, createModelPicker(els.selVisionModel, ui)],
+  [els.selImageModel, createModelPicker(els.selImageModel, ui)]
+]);
 
 $('replaceInstruction').value = defaultReplaceInstruction($('replaceType').value);
 
@@ -300,6 +305,7 @@ function populateModelSelect(select, type) {
     select.value = choiceValue(settings.defaults?.[type]);
     if (!select.value) select.selectedIndex = 0;
   }
+  modelPickers.get(select).setChoices(choices);
 }
 
 function resetDefaultModels() {
@@ -307,6 +313,7 @@ function resetDefaultModels() {
   for (const [select, type] of [[els.selVisionModel, 'vision'], [els.selImageModel, 'image']]) {
     const value = choiceValue(settings.defaults?.[type]);
     if ([...select.options].some((option) => option.value === value)) select.value = value;
+    modelPickers.get(select).sync();
   }
   updateHints();
 }
@@ -400,6 +407,8 @@ function showToast(text) {
 }
 
 function show(el, yes = true) {
+  if (!yes && (el === els.secPrompt || el.id === 'visionModelPicker')) modelPickers.get(els.selVisionModel).close();
+  if (!yes && el === els.secGen) modelPickers.get(els.selImageModel).close();
   el.hidden = !yes;
   scheduleWorkspaceSync();
 }
@@ -816,6 +825,7 @@ function setSurpriseModelState() {
   els.visionModelLabel.dataset.tooltip = label;
   els.visionModelLabel.querySelector('.field-label-text').textContent = ui('看图模型');
   els.selVisionModel.disabled = !els.selVisionModel.value;
+  modelPickers.get(els.selVisionModel).sync();
 }
 
 function applyDefaultRatio() {
@@ -829,6 +839,7 @@ function applyDefaultRatio() {
 }
 
 function resetTaskUI() {
+  for (const picker of modelPickers.values()) picker.close();
   releaseGenerationOwner(localGenerationOwner);
   show($('surpriseChoices'), false);
   show($('visionModelPicker'), true);
