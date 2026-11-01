@@ -63,11 +63,33 @@ export function createModelPicker(select, translate) {
   document.body.appendChild(popup);
 
   let choices = [];
+  let orderedChoices = [];
+  let orderedLanguage = null;
   let filtered = [];
   let activeIndex = -1;
 
   function choiceValue(choice) {
     return JSON.stringify([choice.platformId, choice.model]);
+  }
+
+  function choiceName(choice) {
+    const prefix = `${choice.platformName} · `;
+    return choice.label.startsWith(prefix) ? choice.label.slice(prefix.length) : choice.label;
+  }
+
+  function choicesInDisplayOrder() {
+    const language = document.documentElement.lang || '';
+    if (orderedLanguage === language) return orderedChoices;
+    const collator = new Intl.Collator(language || undefined, { numeric: true, sensitivity: 'base' });
+    const groups = new Map();
+    for (const choice of choices) {
+      if (!groups.has(choice.platformId)) groups.set(choice.platformId, []);
+      groups.get(choice.platformId).push(choice);
+    }
+    orderedChoices = [...groups.values()].flatMap((group) =>
+      group.sort((left, right) => collator.compare(choiceName(left), choiceName(right))));
+    orderedLanguage = language;
+    return orderedChoices;
   }
 
   function position() {
@@ -87,13 +109,27 @@ export function createModelPicker(select, translate) {
     popup.style.bottom = openBelow ? 'auto' : `${window.innerHeight - rect.top + 6}px`;
   }
 
-  function updateActive() {
+  function updateActive({ ensureVisible = true, center = false } = {}) {
     const items = list.querySelectorAll('[role="option"]');
     items.forEach((item, index) => item.classList.toggle('active', index === activeIndex));
     const active = items[activeIndex];
     if (active) {
       search.setAttribute('aria-activedescendant', active.id);
-      active.scrollIntoView({ block: 'nearest' });
+      if (ensureVisible) {
+        const listRect = list.getBoundingClientRect();
+        const activeRect = active.getBoundingClientRect();
+        const heading = active.closest('.model-picker-group')?.querySelector('.model-picker-group-title');
+        const visibleTop = listRect.top + list.clientTop + (heading?.offsetHeight || 0);
+        const visibleBottom = listRect.top + list.clientTop + list.clientHeight;
+        if (center) {
+          const targetTop = visibleTop + Math.max(0, (visibleBottom - visibleTop - activeRect.height) / 2);
+          list.scrollTop += activeRect.top - targetTop;
+        } else if (activeRect.top < visibleTop || activeRect.height > visibleBottom - visibleTop) {
+          list.scrollTop += activeRect.top - visibleTop;
+        } else if (activeRect.bottom > visibleBottom) {
+          list.scrollTop += activeRect.bottom - visibleBottom;
+        }
+      }
     } else {
       search.removeAttribute('aria-activedescendant');
     }
@@ -101,7 +137,7 @@ export function createModelPicker(select, translate) {
 
   function render() {
     const query = search.value.trim().toLocaleLowerCase();
-    filtered = choices.filter((choice) =>
+    filtered = choicesInDisplayOrder().filter((choice) =>
       `${choice.platformName || ''} ${choice.model} ${choice.alias || ''} ${choice.label}`.toLocaleLowerCase().includes(query));
     activeIndex = -1;
     search.removeAttribute('aria-activedescendant');
@@ -133,8 +169,7 @@ export function createModelPicker(select, translate) {
       item.setAttribute('aria-selected', String(selected));
       const name = document.createElement('span');
       name.className = 'model-picker-option-name';
-      const prefix = `${choice.platformName} · `;
-      name.textContent = choice.label.startsWith(prefix) ? choice.label.slice(prefix.length) : choice.label;
+      name.textContent = choiceName(choice);
       const check = document.createElement('span');
       check.className = 'model-picker-check';
       check.setAttribute('aria-hidden', 'true');
@@ -171,6 +206,9 @@ export function createModelPicker(select, translate) {
     render();
     list.scrollTop = 0;
     position();
+    if (popup.hidden) return;
+    activeIndex = filtered.findIndex((choice) => choiceValue(choice) === select.value);
+    updateActive({ center: true });
     search.focus({ preventScroll: true });
   }
 
@@ -235,11 +273,15 @@ export function createModelPicker(select, translate) {
   return {
     setChoices(nextChoices) {
       choices = nextChoices;
+      orderedLanguage = null;
       sync();
       if (!popup.hidden) {
         const scrollTop = list.scrollTop;
+        const activeValue = filtered[activeIndex] ? choiceValue(filtered[activeIndex]) : '';
         render();
         list.scrollTop = scrollTop;
+        activeIndex = filtered.findIndex((choice) => choiceValue(choice) === activeValue);
+        updateActive({ ensureVisible: false });
         position();
       }
     },

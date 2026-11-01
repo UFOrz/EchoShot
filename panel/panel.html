@@ -198,13 +198,17 @@
       <div class="replacement-pair"><div class="replacement-base"><img id="replaceSourceThumb" alt="当前原图" /><span>当前原图</span></div><span class="pair-arrow" aria-hidden="true">→</span><div class="replacement-material"><span class="material-label">替换素材</span><div id="characterPicker" class="character-picker"></div></div></div>
       <div class="replace-type-row">
         <label for="replaceType">替换类型</label>
-        <select id="replaceType">
+        <select id="replaceType" aria-describedby="replaceTemplateHint">
           <option value="person">人物或角色</option>
           <option value="object">物品</option>
           <option value="clothing">服装或穿搭</option>
+          <option value="runninghub-person">simple · 人物或角色</option>
+          <option value="runninghub-object">simple · 物品</option>
+          <option value="runninghub-clothing">simple · 服装或穿搭</option>
         </select>
       </div>
-      <details id="replaceAdvanced" class="advanced-instructions"><summary>高级指令</summary><p class="feature-desc">已有默认指令，可按需修改。</p><textarea id="replaceInstruction" rows="8" aria-label="替换角色或者物品提示词"></textarea></details>
+      <p id="replaceTemplateHint" class="feature-desc">图1是当前原图，图2是替换素材。simple 模板中的 [方括号] 请按素材填写，不需要的项目可删除。</p>
+      <details id="replaceAdvanced" class="advanced-instructions"><summary>高级指令</summary><p class="feature-desc">已有默认指令，可按需修改。</p><textarea id="replaceInstruction" rows="8" aria-label="替换角色或者物品提示词" aria-describedby="replaceTemplateHint"></textarea></details>
     </section>
 
     <section id="secBatch" class="card feature-card" hidden>

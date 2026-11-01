@@ -137,7 +137,83 @@ Do not change the person's identity, face, hair, skin tone, age, body shape, ana
 Do not modify the background, camera, framing, scene layout, non-target people, or unrelated objects.
 Do not retain conflicting design features from the original replaced garment. Do not blend incompatible garments, add extra limbs, distort hands or anatomy, create impossible fabric geometry, duplicate clothing, produce collage edges, or add new text, logos, or watermarks.`;
 
+const RUNNINGHUB_PERSON_REPLACE_INSTRUCTION = `Using Image 1 as the base image, replace the primary target person or
+character in Image 1 with the person or character from Image 2: [person or
+character], [facial features], [skin tone], [hairstyle and hair color],
+[distinctive visible physical features]. If Image 1 contains multiple people,
+replace only the main central subject and leave everyone else unchanged.
+
+Copy the person's recognizable facial identity, facial proportions, skin tone,
+hairstyle, hair color and distinctive visible features from Image 2 exactly.
+Do not blend the two identities or retain the original target's facial traits.
+Adapt the replacement to Image 1's head angle, expression, gaze and body pose.
+Integrate the face, hair, neck and visible skin naturally with correct anatomy,
+hair overlap, garment contact and occlusion, and match Image 1's light direction,
+shadows, visual style and image quality so the person belongs in the scene.
+Use only appearance that is visible in Image 2; where a part is hidden, continue
+the visible appearance in the simplest physically consistent way without
+inventing distinctive features.
+
+Take only the person's identity and physical appearance from Image 2 - do not
+copy their clothing, accessories, pose, expression, camera or background.
+Keep Image 1's clothing, footwear, accessories, body pose, hand placement,
+expression and gaze unchanged. Allow only minimal local fitting adjustments
+needed around the replacement person's hair, neck and clothing boundaries.
+Keep Image 1's camera, framing, background, lighting, visual medium and all
+non-target people and objects unchanged. Only the target person's identity
+and visible physical appearance change.`;
+
+const RUNNINGHUB_OBJECT_REPLACE_INSTRUCTION = `Using Image 1 as the base image, replace the target object in Image 1 with
+the object from Image 2: [target object and location in Image 1], [replacement
+object type], [color], [material and finish], [shape and proportions],
+[pattern / components / visible text or logo]. If Image 1 contains several
+similar objects, change only the specified target.
+
+Copy the object's design, geometry, proportions, color, material, texture,
+pattern and visible details from Image 2 exactly. Place it at the original
+target's location in Image 1 and fit its apparent scale, orientation and
+perspective to the scene without distorting its recognizable design.
+Preserve the existing hand grip, support surface, attachment points, overlap
+and occlusion, and match Image 1's light direction, contact shadows, cast
+shadows, reflections and image quality so the object looks physically present,
+not pasted on or floating. Use only construction that is visible in Image 2;
+where a part is hidden, continue the visible design in the simplest physically
+consistent way. Preserve visible text or logos only as shown; do not invent
+unreadable details or combine features from the original object.
+
+Take only the object from Image 2 - do not copy its background, display surface,
+hands, supports, packaging or unrelated props unless they are part of the
+replacement object itself. Keep Image 1's people, faces, hair, clothing, body
+poses and hand placement unchanged, and keep Image 1's camera, framing,
+background, lighting, visual medium and all unrelated objects unchanged.
+Rebuild only the immediate boundaries, contact shadows and reflections needed
+for integration. Only the target object changes.`;
+
+const RUNNINGHUB_CLOTHING_REPLACE_INSTRUCTION = `Using Image 1 as the base image, replace the clothing worn by the person in
+Image 1 with the outfit from Image 2: [garment type], [color], [fabric],
+[silhouette and length], [neckline and sleeves], [pattern / trims / visible
+text or logo].
+
+Copy the garment's design, cut, color, material, pattern and visible details
+from Image 2 exactly. Fit it naturally onto the body in Image 1 with realistic
+drape, folds, stretch, thickness, overlap and occlusion at the neck,
+shoulders, hands and waist, and match Image 1's light direction, shadows and
+image quality so it looks genuinely worn, not pasted on. Use only construction
+that is visible in Image 2; where a part is hidden, continue the visible design
+in the simplest physically consistent way.
+
+Take only the garment from Image 2 - do not copy its model, face, body, pose
+or background. Keep the person's face, hair, skin tone, body shape, expression
+and pose unchanged, and keep Image 1's camera, framing, background and lighting
+unchanged. Only the clothing changes.`;
+
+const REPLACE_TEMPLATE_TYPES = ['person', 'object', 'clothing',
+  'runninghub-person', 'runninghub-object', 'runninghub-clothing'];
+
 function defaultReplaceInstruction(type = 'person') {
+  if (type === 'runninghub-person') return RUNNINGHUB_PERSON_REPLACE_INSTRUCTION;
+  if (type === 'runninghub-object') return RUNNINGHUB_OBJECT_REPLACE_INSTRUCTION;
+  if (type === 'runninghub-clothing') return RUNNINGHUB_CLOTHING_REPLACE_INSTRUCTION;
   if (type === 'object') return DEFAULT_OBJECT_REPLACE_INSTRUCTION;
   if (type === 'clothing') return DEFAULT_CLOTHING_REPLACE_INSTRUCTION;
   return DEFAULT_PERSON_REPLACE_INSTRUCTION;
@@ -1864,7 +1940,7 @@ async function restoreReplacementDraft() {
   const draft = await getWindowSession('replacementDraft');
   if (draft) {
     selectedCharacterId = typeof draft.characterId === 'string' ? draft.characterId : '';
-    const type = ['person', 'object', 'clothing'].includes(draft.type) ? draft.type : 'person';
+    const type = REPLACE_TEMPLATE_TYPES.includes(draft.type) ? draft.type : 'person';
     $('replaceType').value = type;
     $('replaceInstruction').value = typeof draft.instruction === 'string'
       ? draft.instruction : defaultReplaceInstruction(type);
@@ -2019,7 +2095,7 @@ async function replaceCharacter() {
   }
   if (!source?.dataUrl) return showToast(ui('请先选择需要修改的图片'));
   const characterId = selectedCharacterId;
-  const replaceType = ['person', 'object', 'clothing'].includes($('replaceType').value)
+  const replaceType = REPLACE_TEMPLATE_TYPES.includes($('replaceType').value)
     ? $('replaceType').value
     : 'person';
   const instruction = $('replaceInstruction').value.trim() || defaultReplaceInstruction(replaceType);
@@ -2085,7 +2161,7 @@ async function submitReplacement({ character, replaceType, instruction, sourceSn
       promptZh: promptZhSnapshot,
       explanationLanguage: explanationLanguageSnapshot,
       referenceDataUrl: await blobToDataUrl(character.blob),
-      albumMeta: { kind: 'replacement', replacementType: replaceType, characterId: character.id },
+      albumMeta: { kind: 'replacement', replacementType: replaceType.replace(/^runninghub-/, ''), characterId: character.id },
       jobLabel: '正在替换角色或者物品'
     }});
     if (!resp?.ok) throw new Error(resp?.error || '替换失败');
